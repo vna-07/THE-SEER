@@ -15,7 +15,8 @@ export const OcrResultSchema = z.object({
 
 export type OcrResult = z.infer<typeof OcrResultSchema>;
 
-const SYSTEM = `You are an OCR engine. Transcribe every handwritten or printed mark in the image exactly as written.
+const SYSTEM = `You are an OCR engine. Transcribe every handwritten or printed mark in the document exactly as written.
+The document may have multiple pages. Transcribe each page in order, separated by "--- PAGE N ---".
 Do not interpret, correct, or summarise. Preserve line breaks. If a line is illegible, transcribe it as [illegible].
 For each line, give a confidence 0-1. Give the overall document language (e.g. "en", "xh", "af", "mixed").
 Return JSON matching this shape:
