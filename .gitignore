@@ -51,3 +51,4 @@ scripts/*.bak
 
 .vercel
 .env*
+public/intro-original.mp4
