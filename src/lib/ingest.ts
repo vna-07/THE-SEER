@@ -1,22 +1,8 @@
-import { db, persist } from './db';
+import { db, run, insert, rowsOf } from './db';
 import { log } from './activity';
 import { computeRisks } from './engine';
 import crypto from 'crypto';
 import type { ExtractedRecord } from './extraction';
-
-function rowsOf(c: any, sql: string, args: unknown[] = []) {
-  const stmt = c.prepare(sql);
-  stmt.bind(args);
-  const out: any[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
-
-function lastId(c: any): number {
-  const r = c.exec('SELECT last_insert_rowid() AS id');
-  return r[0].values[0][0] as number;
-}
 
 function hashJson(v: unknown): string {
   return crypto
@@ -132,34 +118,34 @@ function normaliseForMatch(raw: string): string {
     .trim();
 }
 
-function resolveProduct(
+async function resolveProduct(
   c: any,
   name: string,
   unit: string | undefined,
   price: number | null | undefined,
   asOfDate: string
-): { productId: number; wasCreated: boolean } {
+): Promise<{ productId: number; wasCreated: boolean }> {
   const cleaned = String(name ?? '').trim();
   if (!cleaned) return { productId: 0, wasCreated: false };
 
   const { base, size } = extractSize(cleaned);
 
-  // 1. Alias match (exact, case-insensitive)
-  const aliasHit = rowsOf(
+  // 1. Alias match
+  const aliasHit = await rowsOf<{ product_id: number }>(
     c,
     'SELECT product_id FROM product_aliases WHERE alias = ? COLLATE NOCASE',
     [cleaned]
   );
   if (aliasHit.length) {
-    const pid = aliasHit[0].product_id as number;
-    if (price != null) recordPrice(c, pid, price, asOfDate, 'alias-match');
+    const pid = aliasHit[0].product_id;
+    if (price != null) await recordPrice(c, pid, price, asOfDate, 'alias-match');
     return { productId: pid, wasCreated: false };
   }
 
-  // 2. Base + size must both match, both may be null
+  // 2. Base + size match
   const baseNorm = normaliseForMatch(base);
   if (baseNorm) {
-    const existing = rowsOf(
+    const existing = await rowsOf<{ id: number }>(
       c,
       `SELECT id FROM products
        WHERE LOWER(base_name) = LOWER(?)
@@ -167,59 +153,62 @@ function resolveProduct(
       [baseNorm, size]
     );
     if (existing.length) {
-      const pid = existing[0].id as number;
+      const pid = existing[0].id;
       try {
-        c.run(
+        await run(
+          c,
           'INSERT OR IGNORE INTO product_aliases (alias, product_id) VALUES (?, ?)',
           [cleaned, pid]
         );
       } catch {}
-      if (price != null) recordPrice(c, pid, price, asOfDate, 'exact-base-size');
+      if (price != null) await recordPrice(c, pid, price, asOfDate, 'exact-base-size');
       return { productId: pid, wasCreated: false };
     }
   }
 
-  // 3. Create new — insert first, then derive SKU from the row id (guaranteed unique)
-  c.run(
+  // 3. Create new — insert first, derive SKU from row id
+  const newId = await insert(
+    c,
     `INSERT INTO products (name, base_name, size, unit, price, updated_price_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
     [cleaned, baseNorm, size, unit ?? 'unit', price ?? 0, price != null ? asOfDate : null]
   );
-  const newId = lastId(c);
 
-  c.run('UPDATE products SET sku = ? WHERE id = ?', [`SKU-${newId}`, newId]);
+  await run(c, 'UPDATE products SET sku = ? WHERE id = ?', [`SKU-${newId}`, newId]);
 
   try {
-    c.run(
+    await run(
+      c,
       'INSERT OR IGNORE INTO product_aliases (alias, product_id) VALUES (?, ?)',
       [cleaned, newId]
     );
   } catch {}
 
-  if (price != null) recordPrice(c, newId, price, asOfDate, 'new-product');
+  if (price != null) await recordPrice(c, newId, price, asOfDate, 'new-product');
 
   return { productId: newId, wasCreated: true };
 }
 
-function recordPrice(
+async function recordPrice(
   c: any,
   productId: number,
   price: number,
   asOf: string,
   source: string
-): void {
-  const existing = rowsOf(
+): Promise<void> {
+  const existing = await rowsOf<{ id: number }>(
     c,
     'SELECT id FROM price_history WHERE product_id = ? AND price = ? AND as_of = ?',
     [productId, price, asOf]
   );
   if (existing.length) return;
 
-  c.run(
+  await run(
+    c,
     'INSERT INTO price_history (product_id, price, source, as_of) VALUES (?, ?, ?, ?)',
     [productId, price, source, asOf]
   );
-  c.run('UPDATE products SET price = ?, updated_price_at = ? WHERE id = ?', [
+  await run(c, 'UPDATE products SET price = ?, updated_price_at = ? WHERE id = ?', [
     price,
     asOf,
     productId,
@@ -261,8 +250,12 @@ export async function ingestExtracted(
     orders: extracted.orders,
   }).slice(0, 32);
 
-  // Idempotency check — same batch never runs twice
-  const dupe = rowsOf(c, 'SELECT id FROM records WHERE source_hash = ?', [batchHash]);
+  // Idempotency
+  const dupe = await rowsOf<{ id: number }>(
+    c,
+    'SELECT id FROM records WHERE source_hash = ?',
+    [batchHash]
+  );
   if (dupe.length) {
     return {
       productsAdded: 0,
@@ -277,320 +270,287 @@ export async function ingestExtracted(
     };
   }
 
-  c.run('BEGIN');
-
   let productsAdded = 0;
   let salesAdded = 0;
   let expensesAdded = 0;
   let receivablesAdded = 0;
-  let staged = 0;
 
   const skipped = { section: 'unreadable', count: 0, examples: [] as string[] };
 
-  try {
-    const hintYear = Number(recordDate.slice(0, 4)) || undefined;
+  const hintYear = Number(recordDate.slice(0, 4)) || undefined;
 
-    // ─── Business name ───
-    if (extracted.businessName && extracted.businessName.trim().length > 1) {
-      const exists = rowsOf(c, "SELECT value FROM settings WHERE key = 'business_name'");
-      if (!exists.length) {
-        c.run("INSERT INTO settings (key, value) VALUES ('business_name', ?)", [
-          extracted.businessName.trim(),
-        ]);
-      }
+  // ─── Business name ───
+  if (extracted.businessName && extracted.businessName.trim().length > 1) {
+    const exists = await rowsOf<{ value: string }>(
+      c,
+      "SELECT value FROM settings WHERE key = 'business_name'"
+    );
+    if (!exists.length) {
+      await run(
+        c,
+        "INSERT INTO settings (key, value) VALUES ('business_name', ?)",
+        [extracted.businessName.trim()]
+      );
+    }
+  }
+
+  // ─── Suppliers ───
+  for (const s of extracted.suppliers ?? []) {
+    if (!s.name?.trim()) continue;
+    const exists = await rowsOf<{ id: number }>(
+      c,
+      'SELECT id FROM suppliers WHERE LOWER(name) = LOWER(?)',
+      [s.name.trim()]
+    );
+    if (!exists.length) {
+      await run(
+        c,
+        'INSERT INTO suppliers (name, phone, lead_time_days) VALUES (?, ?, ?)',
+        [s.name.trim(), s.phone ?? null, s.leadTimeDays ?? null]
+      );
+    }
+  }
+
+  // ─── Stock counts ───
+  for (let i = 0; i < extracted.products.length; i++) {
+    const p = extracted.products[i];
+    if (!p.name?.trim()) continue;
+
+    if (p.quantity === null || p.quantity === undefined) {
+      skipped.count++;
+      if (skipped.examples.length < 3) skipped.examples.push(`${p.name} (qty missing)`);
+      continue;
     }
 
-    // ─── Suppliers ───
-    for (const s of extracted.suppliers ?? []) {
-      if (!s.name?.trim()) continue;
-      const exists = rowsOf(c, 'SELECT id FROM suppliers WHERE LOWER(name) = LOWER(?)', [
-        s.name.trim(),
-      ]);
-      if (!exists.length) {
-        c.run(
-          'INSERT INTO suppliers (name, phone, lead_time_days) VALUES (?, ?, ?)',
-          [s.name.trim(), s.phone ?? null, s.leadTimeDays ?? null]
+    const { productId } = await resolveProduct(c, p.name.trim(), p.unit, p.price, recordDate);
+
+    const exists = await rowsOf<{ id: number }>(
+      c,
+      'SELECT id FROM stock_events WHERE source_hash = ? AND row_index = ?',
+      [batchHash, i]
+    );
+    if (exists.length) continue;
+
+    await run(
+      c,
+      `INSERT INTO stock_events
+       (product_id, quantity, source_hash, row_index, recorded_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [productId, p.quantity, batchHash, i, recordDate, recordDate + ' 12:00:00']
+    );
+    productsAdded++;
+  }
+
+  // ─── Sales ───
+  for (let i = 0; i < (extracted.sales ?? []).length; i++) {
+    const s = extracted.sales[i];
+    if (!s.item?.trim()) continue;
+
+    if (s.quantity === null || s.quantity === undefined) {
+      skipped.count++;
+      if (skipped.examples.length < 3) skipped.examples.push(`${s.item} (qty missing)`);
+      continue;
+    }
+
+    const exists = await rowsOf<{ id: number }>(
+      c,
+      'SELECT id FROM sales WHERE source_hash = ? AND row_index = ?',
+      [batchHash, i]
+    );
+    if (exists.length) continue;
+
+    const { productId } = await resolveProduct(c, s.item.trim(), undefined, s.unitPrice, recordDate);
+    const parsed = parseDate(s.date, hintYear);
+    const soldAt = (parsed.iso ?? recordDate) + ' 12:00:00';
+
+    await run(
+      c,
+      `INSERT INTO sales
+       (product_id, quantity, unit_price, total, source_hash, row_index, sold_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [productId, s.quantity, s.unitPrice ?? null, s.total ?? null, batchHash, i, soldAt]
+    );
+    salesAdded++;
+  }
+
+  // ─── Expenses ───
+  for (let i = 0; i < (extracted.expenses ?? []).length; i++) {
+    const e = extracted.expenses[i];
+    if (!e.description?.trim() || !e.amount) continue;
+
+    const exists = await rowsOf<{ id: number }>(
+      c,
+      'SELECT id FROM expenses WHERE source_hash = ? AND row_index = ?',
+      [batchHash, i]
+    );
+    if (exists.length) continue;
+
+    const parsed = parseDate(e.date, hintYear);
+    await run(
+      c,
+      `INSERT INTO expenses (date, description, amount, source, source_hash, row_index)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [parsed.iso ?? recordDate, e.description.trim(), e.amount, sourceLabel, batchHash, i]
+    );
+    expensesAdded++;
+  }
+
+  // ─── Receivables ───
+  for (let i = 0; i < (extracted.receivables ?? []).length; i++) {
+    const r = extracted.receivables[i] as any;
+    if (!r.customerName?.trim()) continue;
+
+    const exists = await rowsOf<{ id: number }>(
+      c,
+      'SELECT id FROM receivables WHERE source_hash = ? AND row_index = ?',
+      [batchHash, i]
+    );
+    if (exists.length) continue;
+
+    const phone = r.phone ?? null;
+    const custMatch = phone
+      ? await rowsOf<{ id: number }>(
+          c,
+          'SELECT id FROM customers WHERE LOWER(name) = LOWER(?) AND COALESCE(phone, "") = ?',
+          [r.customerName.trim(), phone]
+        )
+      : await rowsOf<{ id: number }>(
+          c,
+          'SELECT id FROM customers WHERE LOWER(name) = LOWER(?)',
+          [r.customerName.trim()]
         );
-      }
-    }
 
-    // ─── Stock counts ───
-    for (let i = 0; i < extracted.products.length; i++) {
-      const p = extracted.products[i];
-      if (!p.name?.trim()) continue;
-
-      if (p.quantity === null || p.quantity === undefined) {
-        c.run(
-          `INSERT INTO staging_rows
-           (batch_hash, source_label, section, row_index, payload_json, confidence, flags_json, reason)
-           VALUES (?, ?, 'products', ?, ?, ?, ?, ?)`,
-          [
-            batchHash,
-            sourceLabel,
-            i,
-            JSON.stringify(p),
-            p.confidence ?? 0.5,
-            JSON.stringify(['quantity_missing']),
-            'Quantity unreadable',
-          ]
-        );
-        staged++;
-        skipped.count++;
-        if (skipped.examples.length < 3) skipped.examples.push(`${p.name} (qty missing)`);
-        continue;
-      }
-
-      const { productId } = resolveProduct(
+    let customerId: number;
+    if (custMatch.length) {
+      customerId = custMatch[0].id;
+    } else {
+      customerId = await insert(
         c,
-        p.name.trim(),
-        p.unit,
-        p.price,
-        recordDate
-      );
-
-      const exists = rowsOf(
-        c,
-        'SELECT id FROM stock_events WHERE source_hash = ? AND row_index = ?',
-        [batchHash, i]
-      );
-      if (exists.length) continue;
-
-      c.run(
-        `INSERT INTO stock_events
-         (product_id, quantity, source_hash, row_index, recorded_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [productId, p.quantity, batchHash, i, recordDate, recordDate + ' 12:00:00']
-      );
-      productsAdded++;
-    }
-
-    // ─── Sales ───
-    for (let i = 0; i < (extracted.sales ?? []).length; i++) {
-      const s = extracted.sales[i];
-      if (!s.item?.trim()) continue;
-
-      if (s.quantity === null || s.quantity === undefined) {
-        c.run(
-          `INSERT INTO staging_rows
-           (batch_hash, source_label, section, row_index, payload_json, confidence, flags_json, reason)
-           VALUES (?, ?, 'sales', ?, ?, ?, ?, ?)`,
-          [
-            batchHash,
-            sourceLabel,
-            i,
-            JSON.stringify(s),
-            s.confidence ?? 0.5,
-            JSON.stringify(['quantity_missing']),
-            'Quantity unreadable',
-          ]
-        );
-        staged++;
-        skipped.count++;
-        if (skipped.examples.length < 3) skipped.examples.push(`${s.item} (qty missing)`);
-        continue;
-      }
-
-      const exists = rowsOf(
-        c,
-        'SELECT id FROM sales WHERE source_hash = ? AND row_index = ?',
-        [batchHash, i]
-      );
-      if (exists.length) continue;
-
-      const { productId } = resolveProduct(c, s.item.trim(), undefined, s.unitPrice, recordDate);
-      const parsed = parseDate(s.date, hintYear);
-      const soldAt = (parsed.iso ?? recordDate) + ' 12:00:00';
-
-      c.run(
-        `INSERT INTO sales
-         (product_id, quantity, unit_price, total, source_hash, row_index, sold_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [productId, s.quantity, s.unitPrice ?? null, s.total ?? null, batchHash, i, soldAt]
-      );
-      salesAdded++;
-    }
-
-    // ─── Expenses ───
-    for (let i = 0; i < (extracted.expenses ?? []).length; i++) {
-      const e = extracted.expenses[i];
-      if (!e.description?.trim() || !e.amount) continue;
-
-      const exists = rowsOf(
-        c,
-        'SELECT id FROM expenses WHERE source_hash = ? AND row_index = ?',
-        [batchHash, i]
-      );
-      if (exists.length) continue;
-
-      const parsed = parseDate(e.date, hintYear);
-      c.run(
-        `INSERT INTO expenses (date, description, amount, source, source_hash, row_index)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [parsed.iso ?? recordDate, e.description.trim(), e.amount, sourceLabel, batchHash, i]
-      );
-      expensesAdded++;
-    }
-
-    // ─── Receivables ───
-    for (let i = 0; i < (extracted.receivables ?? []).length; i++) {
-      const r = extracted.receivables[i] as any;
-      if (!r.customerName?.trim()) continue;
-
-      const exists = rowsOf(
-        c,
-        'SELECT id FROM receivables WHERE source_hash = ? AND row_index = ?',
-        [batchHash, i]
-      );
-      if (exists.length) continue;
-
-      const phone = r.phone ?? null;
-      const custMatch = phone
-        ? rowsOf(
-            c,
-            'SELECT id FROM customers WHERE LOWER(name) = LOWER(?) AND COALESCE(phone, "") = ?',
-            [r.customerName.trim(), phone]
-          )
-        : rowsOf(c, 'SELECT id FROM customers WHERE LOWER(name) = LOWER(?)', [
-            r.customerName.trim(),
-          ]);
-
-      let customerId: number;
-      if (custMatch.length) {
-        customerId = custMatch[0].id as number;
-      } else {
-        c.run('INSERT INTO customers (name, phone) VALUES (?, ?)', [
-          r.customerName.trim(),
-          phone,
-        ]);
-        customerId = lastId(c);
-      }
-
-      const owing =
-        r.balanceOwed ??
-        (r.amountOriginal != null && r.paid != null
-          ? Math.max(0, r.amountOriginal - r.paid)
-          : r.amount);
-
-      if (!owing || owing <= 0) continue;
-
-      const parsed = parseDate(r.dueDate, hintYear);
-
-      c.run(
-        `INSERT INTO receivables
-         (customer_id, amount, amount_original, amount_paid, due_date, recorded_at, source_hash, row_index)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          customerId,
-          owing,
-          r.amountOriginal ?? null,
-          r.paid ?? null,
-          parsed.iso,
-          recordDate,
-          batchHash,
-          i,
-        ]
-      );
-      receivablesAdded++;
-    }
-
-    // ─── Orders / purchase intents ───
-    for (const o of extracted.orders ?? []) {
-      if (!o.item?.trim() || !o.quantity) continue;
-      const { productId } = resolveProduct(c, o.item.trim(), undefined, null, recordDate);
-      c.run(
-        `INSERT INTO purchase_orders (product_id, quantity, ordered_at, status, source_hash)
-         VALUES (?, ?, ?, 'pending', ?)`,
-        [productId, o.quantity, recordDate, batchHash]
+        'INSERT INTO customers (name, phone) VALUES (?, ?)',
+        [r.customerName.trim(), phone]
       );
     }
 
-    // ─── Record the source (provenance root) ───
-    c.run(
-      `INSERT INTO records
-       (source_hash, image_path, source, extracted_json, confidence_json, ocr_text, record_date, page_type)
+    const owing =
+      r.balanceOwed ??
+      (r.amountOriginal != null && r.paid != null
+        ? Math.max(0, r.amountOriginal - r.paid)
+        : r.amount);
+
+    if (!owing || owing <= 0) continue;
+
+    const parsed = parseDate(r.dueDate, hintYear);
+
+    await run(
+      c,
+      `INSERT INTO receivables
+       (customer_id, amount, amount_original, amount_paid, due_date, recorded_at, source_hash, row_index)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        batchHash,
-        sourceLabel,
-        sourceLabel.split(':')[0] || 'manual',
-        JSON.stringify({
-          businessName: extracted.businessName,
-          pageType: extracted.pageType,
-          products: extracted.products,
-          sales: extracted.sales,
-          expenses: extracted.expenses,
-          suppliers: extracted.suppliers,
-          receivables: extracted.receivables,
-          orders: extracted.orders,
-          rejects: extracted.rejects,
-        }),
-        JSON.stringify({
-          products: extracted.products.map((p) => p.confidence),
-          receivables: extracted.receivables.map((r) => r.confidence),
-        }),
-        extracted.ocr?.text ?? '',
+        customerId,
+        owing,
+        r.amountOriginal ?? null,
+        r.paid ?? null,
+        parsed.iso,
         recordDate,
-        extracted.pageType ?? null,
+        batchHash,
+        i,
       ]
     );
-
-    // ─── Risks → actions (one pending action per risk_key) ───
-    const risks = await computeRisks();
-    for (const risk of risks) {
-      const type = String(risk.actionDraft.type);
-      const draft = risk.actionDraft as any;
-
-      const riskKey =
-        type === 'purchase_order'
-          ? `po:${draft.productName ?? ''}`
-          : type === 'reminder'
-          ? `rem:${draft.customerName ?? ''}`
-          : `${type}:${riskKeyFromInputs(risk.inputs)}`;
-
-      const pending = rowsOf(
-        c,
-        "SELECT id FROM actions WHERE status = 'pending' AND risk_key = ?",
-        [riskKey]
-      );
-      if (pending.length) continue;
-
-      c.run(
-        'INSERT INTO actions (type, risk_key, payload_json, status) VALUES (?, ?, ?, ?)',
-        [type, riskKey, JSON.stringify(draft), 'pending']
-      );
-    }
-
-    c.run('COMMIT');
-    persist(c);
-
-    await log('record.ingested', {
-      source: sourceLabel,
-      batchHash,
-      productsAdded,
-      salesAdded,
-      expensesAdded,
-      receivablesAdded,
-      staged,
-      skipped: skipped.count,
-    });
-    await log('risks.updated', { count: risks.length });
-
-    return {
-      productsAdded,
-      salesAdded,
-      expensesAdded,
-      receivablesAdded,
-      risksQueued: risks.length,
-      staged,
-      skipped,
-      batchHash,
-    };
-  } catch (e) {
-    try {
-      c.run('ROLLBACK');
-    } catch {}
-    throw e;
+    receivablesAdded++;
   }
+
+  // ─── Orders ───
+  for (const o of extracted.orders ?? []) {
+    if (!o.item?.trim() || !o.quantity) continue;
+    const { productId } = await resolveProduct(c, o.item.trim(), undefined, null, recordDate);
+    await run(
+      c,
+      `INSERT INTO purchase_orders (product_id, quantity, ordered_at, status, source_hash)
+       VALUES (?, ?, ?, 'pending', ?)`,
+      [productId, o.quantity, recordDate, batchHash]
+    );
+  }
+
+  // ─── Records (provenance root) ───
+  await run(
+    c,
+    `INSERT INTO records
+     (source_hash, image_path, source, extracted_json, confidence_json, ocr_text, record_date, page_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      batchHash,
+      sourceLabel,
+      sourceLabel.split(':')[0] || 'manual',
+      JSON.stringify({
+        businessName: extracted.businessName,
+        pageType: extracted.pageType,
+        products: extracted.products,
+        sales: extracted.sales,
+        expenses: extracted.expenses,
+        suppliers: extracted.suppliers,
+        receivables: extracted.receivables,
+        orders: extracted.orders,
+        rejects: extracted.rejects,
+      }),
+      JSON.stringify({
+        products: extracted.products.map((p) => p.confidence),
+        receivables: extracted.receivables.map((r) => r.confidence),
+      }),
+      extracted.ocr?.text ?? '',
+      recordDate,
+      extracted.pageType ?? null,
+    ]
+  );
+
+  // ─── Risks → actions ───
+  const risks = await computeRisks();
+  for (const risk of risks) {
+    const type = String(risk.actionDraft.type);
+    const draft = risk.actionDraft as any;
+
+    const riskKey =
+      type === 'purchase_order'
+        ? `po:${draft.productName ?? ''}`
+        : type === 'reminder'
+        ? `rem:${draft.customerName ?? ''}`
+        : `${type}:${riskKeyFromInputs(risk.inputs)}`;
+
+    const pending = await rowsOf<{ id: number }>(
+      c,
+      "SELECT id FROM actions WHERE status = 'pending' AND risk_key = ?",
+      [riskKey]
+    );
+    if (pending.length) continue;
+
+    await run(
+      c,
+      'INSERT INTO actions (type, risk_key, payload_json, status) VALUES (?, ?, ?, ?)',
+      [type, riskKey, JSON.stringify(draft), 'pending']
+    );
+  }
+
+  await log('record.ingested', {
+    source: sourceLabel,
+    batchHash,
+    productsAdded,
+    salesAdded,
+    expensesAdded,
+    receivablesAdded,
+    skipped: skipped.count,
+  });
+  await log('risks.updated', { count: risks.length });
+
+  return {
+    productsAdded,
+    salesAdded,
+    expensesAdded,
+    receivablesAdded,
+    risksQueued: risks.length,
+    staged: 0,
+    skipped,
+    batchHash,
+  };
 }
 
 function riskKeyFromInputs(inputs: Record<string, number | string>): string {

@@ -1,18 +1,9 @@
 import { NextResponse } from 'next/server';
-import { db, persist } from '@/lib/db';
+import { db, rowsOf } from '@/lib/db';
 import { computeRisks } from '@/lib/engine';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-function rowsOf(c: any, sql: string, args: unknown[] = []) {
-  const stmt = c.prepare(sql);
-  stmt.bind(args);
-  const out: any[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
 
 export async function GET() {
   const c = await db();
@@ -28,59 +19,51 @@ export async function GET() {
     { without: 0, with: 0, prevented: 0 }
   );
 
-  const actions = rowsOf(
-    c,
-    'SELECT id, type, payload_json, status, approved_at, created_at FROM actions ORDER BY created_at DESC LIMIT 50'
-  );
+  const actions = await rowsOf(c, 'SELECT id, type, payload_json, status, approved_at, created_at FROM actions ORDER BY created_at DESC LIMIT 50');
 
-  const records = rowsOf(
-    c,
-    'SELECT id, image_path, source, extracted_json, confidence_json, ocr_text, record_date, page_type, created_at FROM records ORDER BY id DESC LIMIT 20'
-  );
+  const records = await rowsOf(c, 'SELECT id, image_path, source, extracted_json, confidence_json, ocr_text, record_date, page_type, created_at FROM records ORDER BY id DESC LIMIT 20');
 
-  const activity = rowsOf(
-    c,
-    'SELECT id, type, detail, created_at FROM activity ORDER BY id DESC LIMIT 50'
-  );
+  const activity = await rowsOf(c, 'SELECT id, type, detail, created_at FROM activity ORDER BY id DESC LIMIT 50');
 
-  const messages = rowsOf(
-    c,
-    'SELECT id, direction, body, channel, sender, created_at FROM messages ORDER BY id DESC LIMIT 30'
-  );
+  const messages = await rowsOf(c, 'SELECT id, direction, body, channel, sender, created_at FROM messages ORDER BY id DESC LIMIT 30');
+
+  const pc = await rowsOf<{ n: number }>(c, 'SELECT COUNT(*) AS n FROM products');
+  const rc = await rowsOf<{ n: number }>(c, "SELECT COUNT(*) AS n FROM receivables WHERE status = 'open'");
+  const rec = await rowsOf<{ n: number }>(c, 'SELECT COUNT(*) AS n FROM records');
+  const ac = await rowsOf<{ n: number }>(c, "SELECT COUNT(*) AS n FROM actions WHERE status = 'pending'");
+  const sc = await rowsOf<{ n: number }>(c, "SELECT COUNT(*) AS n FROM staging_rows WHERE status = 'pending'");
 
   const counts = {
-    products: (rowsOf(c, 'SELECT COUNT(*) AS n FROM products')[0]?.n as number) ?? 0,
-    receivables: (rowsOf(c, "SELECT COUNT(*) AS n FROM receivables WHERE status = 'open'")[0]?.n as number) ?? 0,
-    records: (rowsOf(c, 'SELECT COUNT(*) AS n FROM records')[0]?.n as number) ?? 0,
-    actionsPending: (rowsOf(c, "SELECT COUNT(*) AS n FROM actions WHERE status = 'pending'")[0]?.n as number) ?? 0,
-    stagingPending: (rowsOf(c, "SELECT COUNT(*) AS n FROM staging_rows WHERE status = 'pending'")[0]?.n as number) ?? 0,
+    products: Number(pc[0]?.n ?? 0),
+    receivables: Number(rc[0]?.n ?? 0),
+    records: Number(rec[0]?.n ?? 0),
+    actionsPending: Number(ac[0]?.n ?? 0),
+    stagingPending: Number(sc[0]?.n ?? 0),
   };
 
-  const topMovers = rowsOf(
-    c,
-    `SELECT p.name AS name, p.unit AS unit,
-            COALESCE(SUM(s.quantity), 0) AS units,
-            COALESCE(SUM(s.quantity * p.price), 0) AS revenue
-     FROM sales s
-     JOIN products p ON p.id = s.product_id
-     WHERE s.sold_at >= datetime('now', '-30 days')
-     GROUP BY p.id
-     ORDER BY units DESC
-     LIMIT 5`
-  );
+  const topMovers = await rowsOf(c, `
+    SELECT p.name AS name, p.unit AS unit,
+           COALESCE(SUM(s.quantity), 0) AS units,
+           COALESCE(SUM(s.quantity * p.price), 0) AS revenue
+    FROM sales s
+    JOIN products p ON p.id = s.product_id
+    WHERE s.sold_at >= datetime('now', '-30 days')
+    GROUP BY p.id
+    ORDER BY units DESC
+    LIMIT 5
+  `);
 
-  const expensesSum =
-    (rowsOf(c, 'SELECT COALESCE(SUM(amount), 0) AS n FROM expenses')[0]?.n as number) ?? 0;
+  const expRows = await rowsOf<{ n: number }>(c, 'SELECT COALESCE(SUM(amount), 0) AS n FROM expenses');
+  const salesRows = await rowsOf<{ n: number }>(c, `
+    SELECT COALESCE(SUM(s.quantity * p.price), 0) AS n
+    FROM sales s JOIN products p ON p.id = s.product_id
+    WHERE s.sold_at >= datetime('now', '-30 days')
+  `);
 
-  const salesSum =
-    (rowsOf(
-      c,
-      `SELECT COALESCE(SUM(s.quantity * p.price), 0) AS n
-       FROM sales s JOIN products p ON p.id = s.product_id
-       WHERE s.sold_at >= datetime('now', '-30 days')`
-    )[0]?.n as number) ?? 0;
+  const expensesSum = Number(expRows[0]?.n ?? 0);
+  const salesSum = Number(salesRows[0]?.n ?? 0);
 
-  const settingsRows = rowsOf(c, 'SELECT key, value FROM settings');
+  const settingsRows = await rowsOf<{ key: string; value: string }>(c, 'SELECT key, value FROM settings');
   const settings: Record<string, string> = {};
   for (const row of settingsRows) settings[String(row.key)] = String(row.value);
 

@@ -1,4 +1,4 @@
-import { db } from './db';
+import { db, rowsOf } from './db';
 import type { Risk } from './types';
 
 export const HORIZON_DAYS = 7;
@@ -22,51 +22,40 @@ const reorderQty = (
     )
   );
 
-type Row = Record<string, number | string | null>;
-
-function rowsOf(c: any, sql: string, args: unknown[] = []): Row[] {
-  const stmt = c.prepare(sql);
-  stmt.bind(args);
-  const out: Row[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
-
 export async function computeRisks(recoveryRate = 0.6): Promise<Risk[]> {
   const c = await db();
   const risks: Risk[] = [];
 
-  const products = rowsOf(c, 'SELECT * FROM products');
+  // ─── Single query for all products + stock + demand + supplier ───
+  const products = await rowsOf<Record<string, any>>(
+    c,
+    `SELECT
+       p.*,
+       COALESCE(st.stock, 0) AS stock,
+       COALESCE(dm.demand, 0) AS demand,
+       s.name AS supplier_name,
+       s.lead_time_days AS lead_time_days
+     FROM products p
+     LEFT JOIN (
+       SELECT product_id, SUM(quantity) AS stock
+       FROM stock_events
+       GROUP BY product_id
+     ) st ON st.product_id = p.id
+     LEFT JOIN (
+       SELECT product_id, SUM(quantity) / 7.0 AS demand
+       FROM sales
+       WHERE sold_at >= datetime('now', '-7 days')
+       GROUP BY product_id
+     ) dm ON dm.product_id = p.id
+     LEFT JOIN suppliers s ON s.id = p.supplier_id`
+  );
 
   for (const p of products) {
-    const dRows = rowsOf(
-      c,
-      `SELECT COALESCE(SUM(quantity), 0) / 7.0 AS demand
-       FROM sales
-       WHERE product_id = ? AND sold_at >= datetime('now', '-7 days')`,
-      [p.id]
-    );
-    const demand = Number(dRows[0]?.demand ?? 0);
+    const demand = Number(p.demand ?? 0);
     if (demand <= 0) continue;
 
-    const sRows = rowsOf(
-      c,
-      `SELECT COALESCE(SUM(quantity), 0) AS stock
-       FROM stock_events WHERE product_id = ?`,
-      [p.id]
-    );
-    const stock = Number(sRows[0]?.stock ?? 0);
-
-    const supRows = rowsOf(
-      c,
-      `SELECT s.* FROM suppliers s
-       JOIN products p ON p.supplier_id = s.id
-       WHERE p.id = ?`,
-      [p.id]
-    );
-    const supplier = supRows[0];
-    const lead = Number(supplier?.lead_time_days ?? 1);
+    const stock = Number(p.stock ?? 0);
+    const lead = Number(p.lead_time_days ?? 1);
     const price = Number(p.price);
 
     const d = daysLeft(stock, demand);
@@ -100,14 +89,15 @@ export async function computeRisks(recoveryRate = 0.6): Promise<Risk[]> {
           productId: p.id,
           productName: p.name,
           quantity: qty,
-          supplier: supplier?.name,
+          supplier: p.supplier_name,
           message: `Please supply ${qty} ${p.unit} of ${p.name}.`,
         },
       });
     }
   }
 
-  const recv = rowsOf(
+  // ─── Single query for all open receivables ───
+  const recv = await rowsOf<Record<string, any>>(
     c,
     `SELECT r.*, c.name AS customer_name
      FROM receivables r

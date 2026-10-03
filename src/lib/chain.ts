@@ -1,16 +1,7 @@
 import crypto from 'crypto';
-import { db, persist } from './db';
+import { db, run, rowsOf } from './db';
 
 const SECRET = process.env.SIGNING_SECRET ?? 'seer-dev-secret-do-not-use-in-prod';
-
-function rowsOf(c: any, sql: string, args: unknown[] = []) {
-  const stmt = c.prepare(sql);
-  stmt.bind(args);
-  const out: any[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
 
 function sha(input: string): string {
   return crypto.createHmac('sha256', SECRET).update(input).digest('hex');
@@ -37,22 +28,23 @@ export async function appendToChain(
 ): Promise<{ seq: number; hash: string; prevHash: string }> {
   const c = await db();
 
-  const lastRows = rowsOf(c, 'SELECT seq, hash FROM chain ORDER BY seq DESC LIMIT 1');
+  const lastRows = await rowsOf<{ seq: number; hash: string }>(
+    c,
+    'SELECT seq, hash FROM chain ORDER BY seq DESC LIMIT 1'
+  );
   const prevSeq = lastRows.length ? Number(lastRows[0].seq) : 0;
-  const prevHash = lastRows.length
-    ? String(lastRows[0].hash)
-    : '0'.repeat(64);
+  const prevHash = lastRows.length ? String(lastRows[0].hash) : '0'.repeat(64);
 
   const seq = prevSeq + 1;
   const entryJson = canonicalise(entry);
   const payload = prevHash + '|' + entryType + '|' + entryJson;
   const hash = sha(payload);
 
-  c.run(
+  await run(
+    c,
     'INSERT INTO chain (seq, entry_type, entry_json, prev_hash, hash) VALUES (?, ?, ?, ?, ?)',
     [seq, entryType, entryJson, prevHash, hash]
   );
-  persist(c);
 
   return { seq, hash, prevHash };
 }
@@ -70,7 +62,7 @@ export type ChainEntry = {
 
 export async function getChain(limit = 100): Promise<ChainEntry[]> {
   const c = await db();
-  const rows = rowsOf(
+  const rows = await rowsOf<Record<string, any>>(
     c,
     'SELECT id, seq, entry_type, entry_json, prev_hash, hash, created_at FROM chain ORDER BY seq ASC'
   );

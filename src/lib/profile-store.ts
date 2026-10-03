@@ -1,44 +1,32 @@
-import { db, persist } from './db';
+import { db, run, rowsOf } from './db';
 import { LayoutProfileSchema, type LayoutProfile } from './layout';
 
-function rowsOf(c: any, sql: string, args: unknown[] = []) {
-  const stmt = c.prepare(sql);
-  stmt.bind(args);
-  const out: any[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
-
-// ─── SHOP KEY ──────────────────────────────────────────────────
-// A shop is identified by any of these, in order of preference:
-//   1. The business name in settings (set by the ingest pipeline)
-//   2. A stable identifier the caller passes explicitly
-//   3. The channel + sender (a specific chat / phone number)
-//   4. 'default'
-//
-// The caller decides. This module just stores and retrieves.
-
 export async function getShopKey(): Promise<string> {
+  const explicit = process.env.SEER_SHOP_KEY;
+  if (explicit && explicit.trim()) return explicit.trim();
+
   const c = await db();
-  const r = rowsOf(c, "SELECT value FROM settings WHERE key = 'business_name'");
-  if (r.length && r[0].value) return String(r[0].value).trim();
+  const r = await rowsOf<{ value: string }>(
+    c,
+    "SELECT value FROM settings WHERE key = 'business_name'"
+  );
+  if (r.length && r[0].value) {
+    const v = String(r[0].value).trim();
+    if (v.length > 1 && v.length < 40 && !/[\/]/.test(v) && !/counter/i.test(v)) {
+      return v;
+    }
+  }
   return 'default';
 }
 
-// ─── READ ──────────────────────────────────────────────────────
-
-export async function loadProfile(
-  shopKey: string
-): Promise<LayoutProfile | null> {
+export async function loadProfile(shopKey: string): Promise<LayoutProfile | null> {
   const c = await db();
-  const r = rowsOf(
+  const r = await rowsOf<Record<string, any>>(
     c,
     'SELECT profile_json, layout_confidence FROM shop_profiles WHERE shop_key = ?',
     [shopKey]
   );
   if (!r.length) return null;
-
   try {
     const parsed = JSON.parse(String(r[0].profile_json));
     return LayoutProfileSchema.parse(parsed);
@@ -48,15 +36,12 @@ export async function loadProfile(
   }
 }
 
-// ─── WRITE ─────────────────────────────────────────────────────
-
 export async function saveProfile(
   shopKey: string,
   profile: LayoutProfile
 ): Promise<void> {
   const c = await db();
-
-  const existing = rowsOf(
+  const existing = await rowsOf<{ sample_count: number }>(
     c,
     'SELECT sample_count FROM shop_profiles WHERE shop_key = ?',
     [shopKey]
@@ -65,45 +50,34 @@ export async function saveProfile(
   const profileJson = JSON.stringify(profile);
 
   if (existing.length) {
-    // Blend confidence: new profile observed, so we're a bit more sure
     const oldCount = Number(existing[0].sample_count ?? 1);
-    c.run(
+    await run(
+      c,
       `UPDATE shop_profiles
        SET profile_json = ?, layout_confidence = ?, sample_count = ?, updated_at = datetime('now')
        WHERE shop_key = ?`,
-      [
-        profileJson,
-        profile.layout_confidence ?? 0.5,
-        oldCount + 1,
-        shopKey,
-      ]
+      [profileJson, profile.layout_confidence ?? 0.5, oldCount + 1, shopKey]
     );
   } else {
-    c.run(
+    await run(
+      c,
       `INSERT INTO shop_profiles (shop_key, profile_json, layout_confidence, sample_count)
        VALUES (?, ?, ?, 1)`,
       [shopKey, profileJson, profile.layout_confidence ?? 0.5]
     );
   }
-
-  persist(c);
 }
-
-// ─── CLEAR ─────────────────────────────────────────────────────
 
 export async function clearProfile(shopKey: string): Promise<void> {
   const c = await db();
-  c.run('DELETE FROM shop_profiles WHERE shop_key = ?', [shopKey]);
-  persist(c);
+  await run(c, 'DELETE FROM shop_profiles WHERE shop_key = ?', [shopKey]);
 }
-
-// ─── STATS ─────────────────────────────────────────────────────
 
 export async function listProfiles(): Promise<
   Array<{ shop_key: string; layout_confidence: number; sample_count: number; updated_at: string }>
 > {
   const c = await db();
-  const r = rowsOf(
+  const r = await rowsOf<Record<string, any>>(
     c,
     'SELECT shop_key, layout_confidence, sample_count, updated_at FROM shop_profiles ORDER BY updated_at DESC'
   );

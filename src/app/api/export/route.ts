@@ -1,17 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { db, rowsOf } from '@/lib/db';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-function rowsOf(c: any, sql: string, args: unknown[] = []) {
-  const stmt = c.prepare(sql);
-  stmt.bind(args);
-  const out: any[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
 
 function csvCell(v: unknown): string {
   if (v === null || v === undefined) return '';
@@ -36,36 +27,32 @@ export async function GET(req: NextRequest) {
   let filename = 'seer-export.csv';
 
   if (type === 'products') {
-    const products = rowsOf(c, 'SELECT id, name, unit, price, cost FROM products');
+    const products = await rowsOf<Record<string, any>>(c, 'SELECT id, name, unit, price, cost FROM products');
 
     const rows: unknown[][] = [];
     for (const p of products) {
-      const stock = Number(
-        (rowsOf(c, 'SELECT COALESCE(SUM(quantity),0) AS n FROM stock_events WHERE product_id = ?', [p.id])[0]?.n as number) ?? 0
-      );
-      const demand = Number(
-        (rowsOf(
-          c,
-          `SELECT COALESCE(SUM(quantity),0)/7.0 AS n FROM sales
-           WHERE product_id = ? AND sold_at >= datetime('now','-7 days')`,
-          [p.id]
-        )[0]?.n as number) ?? 0
-      );
-      const sold30 = rowsOf(
-        c,
-        `SELECT COALESCE(SUM(quantity),0) AS units,
-                COUNT(*) AS txn,
-                MAX(sold_at) AS last_at
-         FROM sales
-         WHERE product_id = ? AND sold_at >= datetime('now','-30 days')`,
-        [p.id]
-      )[0];
-      const units30 = Number(sold30?.units ?? 0);
-      const txn30 = Number(sold30?.txn ?? 0);
-      const lastAt = sold30?.last_at ?? '';
+      const sRow = await rowsOf<{ n: number }>(c, 'SELECT COALESCE(SUM(quantity),0) AS n FROM stock_events WHERE product_id = ?', [p.id]);
+      const stock = Number(sRow[0]?.n ?? 0);
 
-      const daysLeft =
-        demand > 0 ? Number((stock / demand).toFixed(2)) : null;
+      const dRow = await rowsOf<{ n: number }>(c, `
+        SELECT COALESCE(SUM(quantity),0)/7.0 AS n FROM sales
+        WHERE product_id = ? AND sold_at >= datetime('now','-7 days')
+      `, [p.id]);
+      const demand = Number(dRow[0]?.n ?? 0);
+
+      const sold30 = await rowsOf<Record<string, any>>(c, `
+        SELECT COALESCE(SUM(quantity),0) AS units,
+               COUNT(*) AS txn,
+               MAX(sold_at) AS last_at
+        FROM sales
+        WHERE product_id = ? AND sold_at >= datetime('now','-30 days')
+      `, [p.id]);
+
+      const units30 = Number(sold30[0]?.units ?? 0);
+      const txn30 = Number(sold30[0]?.txn ?? 0);
+      const lastAt = sold30[0]?.last_at ?? '';
+
+      const daysLeft = demand > 0 ? Number((stock / demand).toFixed(2)) : null;
       const revenue30 = units30 * Number(p.price ?? 0);
 
       rows.push([
@@ -83,7 +70,6 @@ export async function GET(req: NextRequest) {
       ]);
     }
 
-    // Rank by 30-day volume (popularity)
     const sortedByVolume = [...rows].sort((a, b) => Number(b[7]) - Number(a[7]));
     const rankMap = new Map<any, number>();
     sortedByVolume.forEach((r, i) => rankMap.set(r[0], i + 1));
@@ -110,14 +96,13 @@ export async function GET(req: NextRequest) {
   }
 
   if (type === 'sales') {
-    const sales = rowsOf(
-      c,
-      `SELECT s.id, s.sold_at, p.id AS product_id, p.name AS product_name,
-              s.quantity, p.price AS unit_price
-       FROM sales s JOIN products p ON p.id = s.product_id
-       ORDER BY s.sold_at DESC
-       LIMIT 5000`
-    );
+    const sales = await rowsOf<Record<string, any>>(c, `
+      SELECT s.id, s.sold_at, p.id AS product_id, p.name AS product_name,
+             s.quantity, p.price AS unit_price
+      FROM sales s JOIN products p ON p.id = s.product_id
+      ORDER BY s.sold_at DESC
+      LIMIT 5000
+    `);
 
     const rows = sales.map((s) => [
       s.id,
@@ -129,18 +114,12 @@ export async function GET(req: NextRequest) {
       (Number(s.quantity) * Number(s.unit_price ?? 0)).toFixed(2),
     ]);
 
-    csv = toCsv(
-      ['Sale ID', 'Date', 'Product ID', 'Product', 'Qty', 'Unit Price (R)', 'Total (R)'],
-      rows
-    );
+    csv = toCsv(['Sale ID', 'Date', 'Product ID', 'Product', 'Qty', 'Unit Price (R)', 'Total (R)'], rows);
     filename = `seer-sales-${new Date().toISOString().slice(0, 10)}.csv`;
   }
 
   if (type === 'expenses') {
-    const expenses = rowsOf(
-      c,
-      'SELECT id, date, description, amount, source FROM expenses ORDER BY date DESC LIMIT 5000'
-    );
+    const expenses = await rowsOf<Record<string, any>>(c, 'SELECT id, date, description, amount, source FROM expenses ORDER BY date DESC LIMIT 5000');
 
     const rows = expenses.map((e) => [
       e.id,
@@ -155,13 +134,12 @@ export async function GET(req: NextRequest) {
   }
 
   if (type === 'receivables') {
-    const rows = rowsOf(
-      c,
-      `SELECT r.id, cu.name AS customer_name, cu.phone,
-              r.amount, r.due_date, r.status
-       FROM receivables r JOIN customers cu ON cu.id = r.customer_id
-       ORDER BY r.due_date ASC`
-    );
+    const rows = await rowsOf<Record<string, any>>(c, `
+      SELECT r.id, cu.name AS customer_name, cu.phone,
+             r.amount, r.due_date, r.status
+      FROM receivables r JOIN customers cu ON cu.id = r.customer_id
+      ORDER BY r.due_date ASC
+    `);
 
     const mapped = rows.map((r) => {
       const age = r.due_date
@@ -170,21 +148,14 @@ export async function GET(req: NextRequest) {
       return [r.id, r.customer_name, r.phone ?? '', Number(r.amount ?? 0).toFixed(2), r.due_date ?? '', age, r.status];
     });
 
-    csv = toCsv(
-      ['Receivable ID', 'Customer', 'Phone', 'Amount (R)', 'Due Date', 'Days Overdue', 'Status'],
-      mapped
-    );
+    csv = toCsv(['Receivable ID', 'Customer', 'Phone', 'Amount (R)', 'Due Date', 'Days Overdue', 'Status'], mapped);
     filename = `seer-receivables-${new Date().toISOString().slice(0, 10)}.csv`;
   }
 
   if (!csv) {
-    return NextResponse.json(
-      { error: 'Unknown type. Use ?type=products|sales|expenses|receivables' },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: 'Unknown type. Use ?type=products|sales|expenses|receivables' }, { status: 400 });
   }
 
-  // Excel-friendly BOM + UTF-8
   const body = '\uFEFF' + csv;
 
   return new NextResponse(body, {

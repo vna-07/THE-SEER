@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, persist } from '@/lib/db';
+import { db, run, rowsOf } from '@/lib/db';
 import { log } from '@/lib/activity';
 
 export const runtime = 'nodejs';
@@ -9,30 +9,50 @@ export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id } = await params;
-  const numericId = Number(id);
-  if (!Number.isFinite(numericId)) {
-    return NextResponse.json({ error: 'invalid id' }, { status: 400 });
+  try {
+    const { id } = await params;
+    const numericId = Number(id);
+    if (!Number.isFinite(numericId)) {
+      return NextResponse.json({ ok: false, error: 'invalid id' }, { status: 400 });
+    }
+
+    const c = await db();
+
+    const rows = await rowsOf<Record<string, any>>(
+      c,
+      'SELECT * FROM actions WHERE id = ?',
+      [numericId]
+    );
+
+    if (!rows.length) {
+      return NextResponse.json({ ok: false, error: 'not found' }, { status: 404 });
+    }
+
+    const action = rows[0];
+
+    await run(
+      c,
+      "UPDATE actions SET status = 'approved', approved_at = datetime('now') WHERE id = ?",
+      [numericId]
+    );
+
+    await log('action.approved', { ids: [numericId], type: action.type, via: 'dashboard' });
+
+    try {
+      const { appendToChain } = await import('@/lib/chain');
+      await appendToChain('action.approved', {
+        ids: [numericId],
+        action,
+        via: 'dashboard',
+      });
+    } catch (e) {
+      console.error('[approve] chain append failed:', e);
+    }
+
+    return NextResponse.json({ ok: true, id: numericId });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[approve] failed:', msg);
+    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
-
-  const c = await db();
-
-  const stmt = c.prepare('SELECT * FROM actions WHERE id = ?');
-  stmt.bind([numericId]);
-  if (!stmt.step()) {
-    stmt.free();
-    return NextResponse.json({ error: 'not found' }, { status: 404 });
-  }
-  const action = stmt.getAsObject();
-  stmt.free();
-
-  c.run(
-    "UPDATE actions SET status = 'approved', approved_at = datetime('now') WHERE id = ?",
-    [numericId]
-  );
-  persist(c);
-
-  await log('action.approved', { ids: [numericId], type: action.type });
-
-  return NextResponse.json({ ok: true, id: numericId });
 }

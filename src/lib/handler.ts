@@ -1,4 +1,4 @@
-import { db, persist } from './db';
+import { db, run, insert, rowsOf } from './db';
 import { log } from './activity';
 import { sendOnChannel, type InboundMessage } from './channels';
 import { extractRecord } from './extraction';
@@ -18,15 +18,6 @@ import {
   overrideStock,
   devMenu,
 } from './dev';
-
-function rowsOf(c: any, sql: string, args: unknown[] = []) {
-  const stmt = c.prepare(sql);
-  stmt.bind(args);
-  const out: any[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
 
 function fmtRand(n: number): string {
   return 'R' + Math.round(n).toLocaleString('en-ZA');
@@ -78,10 +69,6 @@ function isGreeting(body: string): boolean {
 
 const MENU_COMMANDS = ['today', 'stock', 'owed', 'report', 'statement', 'csv', 'help', 'review'];
 
-// ═══════════════════════════════════════════════════════════════
-// REVIEW PREVIEW HELPER
-// ═══════════════════════════════════════════════════════════════
-
 function previewStagedRow(section: string, payload: any): string {
   try {
     const p = payload ?? {};
@@ -91,46 +78,33 @@ function previewStagedRow(section: string, payload: any): string {
       const cls = p.note_class ? `[${p.note_class}] ` : '';
       return `${cls}${raw.slice(0, 70)}`;
     }
-
     if (section === 'total' || p.kind === 'total') {
       const amt = p.amount !== null && p.amount !== undefined ? `R${p.amount}` : 'R?';
       const scope = p.total_scope ? ` (${p.total_scope})` : '';
       const raw = String(p.raw_text ?? '').replace(/\s+/g, ' ').trim();
       return `${amt}${scope} — ${raw.slice(0, 50)}`;
     }
-
     if (section === 'sales' || p.kind === 'sale') {
       const item = p.item ?? p.raw_text ?? 'sale';
       const qty = p.quantity ?? p.qty ?? '?';
       const price = p.unitPrice ?? p.unit_price;
       return `${item} × ${qty}${price ? ` @ R${price}` : ''}`;
     }
-
     if (section === 'products' || p.kind === 'stock_count' || p.kind === 'stock_in') {
       const name = p.name ?? p.item ?? 'item';
       const qty = p.quantity ?? '?';
       return `${name} — qty unread (${qty})`;
     }
-
-    if (section === 'credit_repaid') {
-      return `repaid: ${p.party ?? '?'} — R${p.amount ?? '?'}`;
-    }
-
-    if (section === 'wage') {
-      return `wage: ${p.item ?? p.raw_text ?? '?'} — R${p.amount ?? '?'}`;
-    }
-
+    if (section === 'credit_repaid') return `repaid: ${p.party ?? '?'} — R${p.amount ?? '?'}`;
+    if (section === 'wage') return `wage: ${p.item ?? p.raw_text ?? '?'} — R${p.amount ?? '?'}`;
     if (section === 'receivables' || p.kind === 'credit_given') {
       return `${p.customerName ?? p.party ?? '?'} — R${p.amount ?? '?'}`;
     }
-
     if (section === 'expenses' || p.kind === 'expense' || p.kind === 'purchase') {
       return `${p.description ?? p.item ?? '?'} — R${p.amount ?? '?'}`;
     }
-
     const raw = String(p.raw_text ?? '').replace(/\s+/g, ' ').trim();
     if (raw) return raw.slice(0, 70);
-
     const keys = Object.keys(p).slice(0, 3);
     return keys.map((k) => `${k}=${JSON.stringify(p[k])}`).join(' ').slice(0, 70);
   } catch {
@@ -155,21 +129,21 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     }
   };
 
-  c.run(
+  await run(
+    c,
     'INSERT INTO messages (direction, body, channel, sender) VALUES (?, ?, ?, ?)',
     ['in', mediaUrl ? '[media]' : body, channel, from]
   );
-  persist(c);
   await log('message.in', { channel, from, body: body.slice(0, 120), hasMedia: !!mediaUrl });
 
-  const state = getSession(c, sessionKey);
+  const state = await getSession(c, sessionKey);
   const bodyTrim = body.trim();
   const kw = bodyTrim.toLowerCase();
 
-  // ═══ DEV MODE FLOWS ═══
+  // ═══ DEV MODE ═══
 
   if (kw === 'chat ovrd') {
-    setSession(c, sessionKey, 'AWAITING_DEV_PIN');
+    await setSession(c, sessionKey, 'AWAITING_DEV_PIN');
     await send(
       [
         'SECURITY CHALLENGE REQUIRED',
@@ -184,7 +158,7 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
 
   if (state === 'AWAITING_DEV_PIN') {
     if (verifyPasscode(bodyTrim)) {
-      setSession(c, sessionKey, 'DEV_MODE_ACTIVE');
+      await setSession(c, sessionKey, 'DEV_MODE_ACTIVE');
       await log('dev.auth_success', { channel, from });
       await send(
         [
@@ -195,7 +169,7 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
         ].join('\n')
       );
     } else {
-      clearSession(c, sessionKey);
+      await clearSession(c, sessionKey);
       await log('dev.auth_failed', { channel, from });
       await send('AUTHENTICATION FAILED. Access logged. Returning to standard mode.');
     }
@@ -205,11 +179,11 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
   if (state === 'AWAITING_WIPE_CONFIRM') {
     if (bodyTrim.toUpperCase() === 'CONFIRM WIPE') {
       await wipeAll();
-      clearSession(c, sessionKey);
+      await clearSession(c, sessionKey);
       await log('dev.wipe', { channel, from });
       await send('Business node reset. Ready for fresh onboarding.');
     } else {
-      clearSession(c, sessionKey);
+      await clearSession(c, sessionKey);
       await send('Wipe cancelled. Returning to standard mode.');
     }
     return;
@@ -217,7 +191,7 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
 
   if (state === 'DEV_MODE_ACTIVE') {
     if (kw === 'exit') {
-      clearSession(c, sessionKey);
+      await clearSession(c, sessionKey);
       await send(
         [
           'Exited dev mode.',
@@ -228,39 +202,33 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
       );
       return;
     }
-
     if (kw === 'dev help' || kw === 'dev menu') {
       await send(devMenu());
       return;
     }
-
     if (kw === 'dev logs') {
-      const lines = tailLogs(c, 15);
+      const lines = await tailLogs(c, 15);
       await send(['SEER — Recent activity logs', '', ...lines].join('\n'));
       return;
     }
-
     if (kw === 'dev raw') {
-      await send(lastRecordJson(c));
+      const raw = await lastRecordJson(c);
+      await send(raw);
       return;
     }
-
     if (kw === 'dev reset') {
-      c.run('DELETE FROM pending_images WHERE sender = ?', [from]);
-      c.run("DELETE FROM actions WHERE status = 'pending'");
-      persist(c);
+      await run(c, 'DELETE FROM pending_images WHERE sender = ?', [from]);
+      await run(c, "DELETE FROM actions WHERE status = 'pending'");
       await send('Photo buffer and pending queue cleared. Database untouched.');
       return;
     }
-
     if (kw === 'dev seed') {
       const r = await runSeed();
       await send(`Demo dataset loaded: ${r.products} products, ${r.receivables} open debt.`);
       return;
     }
-
     if (kw === 'dev wipeall') {
-      setSession(c, sessionKey, 'AWAITING_WIPE_CONFIRM');
+      await setSession(c, sessionKey, 'AWAITING_WIPE_CONFIRM');
       await send(
         [
           'WARNING: This will permanently purge all business data.',
@@ -270,30 +238,27 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
       );
       return;
     }
-
     if (kw.startsWith('dev override')) {
       const m = bodyTrim.match(/^dev override\s+(.+?)\s+(\d+)$/i);
       if (!m) {
         await send('Usage: dev override <item> <qty>   e.g. dev override milk 50');
         return;
       }
-      const result = overrideStock(c, m[1], Number(m[2]));
+      const result = await overrideStock(c, m[1], Number(m[2]));
       await send(result);
       return;
     }
-
     await send('Unknown dev command. Type "dev help" for the list, or "exit" to leave.');
     return;
   }
 
-  // ═══ REVIEW QUEUE ACTIONS (keep / drop) ═══
-  // Matches: "keep all", "drop all", "keep 1", "keep 1,2,3", "drop 5"
+  // ═══ REVIEW QUEUE ACTIONS ═══
 
   if (/^(keep|drop)\s+(all|[\d,\s]+)$/i.test(bodyTrim)) {
     const isDrop = kw.startsWith('drop');
     const isAll = /\ball\b/i.test(bodyTrim);
 
-    const rows = rowsOf(
+    const rows = await rowsOf<Record<string, any>>(
       c,
       "SELECT id, section, payload_json FROM staging_rows WHERE status = 'pending' ORDER BY id ASC"
     );
@@ -323,16 +288,18 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     const newStatus = isDrop ? 'discarded' : 'accepted';
 
     for (const r of selected) {
-      c.run(
+      await run(
+        c,
         "UPDATE staging_rows SET status = ?, reviewed_at = datetime('now') WHERE id = ?",
         [newStatus, r.id]
       );
     }
-    persist(c);
 
-    const remaining = Number(
-      (rowsOf(c, "SELECT COUNT(*) AS n FROM staging_rows WHERE status = 'pending'")[0]?.n as number) ?? 0
+    const remainingRows = await rowsOf<{ n: number }>(
+      c,
+      "SELECT COUNT(*) AS n FROM staging_rows WHERE status = 'pending'"
     );
+    const remaining = Number(remainingRows[0]?.n ?? 0);
 
     await log(isDrop ? 'staging.discarded' : 'staging.accepted', {
       count: selected.length,
@@ -341,9 +308,7 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     });
 
     if (isDrop) {
-      await send(
-        `Discarded ${selected.length} row(s).\n${remaining} still pending.`
-      );
+      await send(`Discarded ${selected.length} row(s).\n${remaining} still pending.`);
     } else {
       await send(
         [
@@ -357,18 +322,19 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     return;
   }
 
-  // ═══ NORMAL USER FLOW ═══
+  // ═══ NORMAL FLOW ═══
 
-  const pendingCount = Number(
-    (rowsOf(c, "SELECT COUNT(*) AS n FROM actions WHERE status = 'pending'")[0]?.n as number) ?? 0
+  const pcRows = await rowsOf<{ n: number }>(
+    c,
+    "SELECT COUNT(*) AS n FROM actions WHERE status = 'pending'"
   );
+  const pendingCount = Number(pcRows[0]?.n ?? 0);
 
   if (pendingCount > 0) {
     const approval = parseApproval(bodyTrim);
     if (approval && approval.type === 'approve') {
       const all = approval.ids.includes('ALL');
-
-      const pending = rowsOf(
+      const pending = await rowsOf<Record<string, any>>(
         c,
         "SELECT id, type, payload_json FROM actions WHERE status = 'pending' ORDER BY id ASC"
       );
@@ -391,13 +357,14 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
       }
 
       for (const action of approved) {
-        c.run(
+        await run(
+          c,
           "UPDATE actions SET status = 'approved', approved_at = datetime('now') WHERE id = ?",
           [action.id]
         );
       }
-      persist(c);
       await log('action.approved', { ids: approved.map((action) => action.id), channel });
+
       try {
         const { appendToChain } = await import('./chain');
         await appendToChain('action.approved', {
@@ -436,10 +403,6 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
       return;
     }
 
-    if (approval && approval.type === 'report') {
-      // fall through
-    }
-
     const isShortAmbiguous =
       bodyTrim.length <= 3 &&
       !mediaUrl &&
@@ -460,7 +423,6 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     }
   }
 
-  // ─── Numbered menu selection ───
   if (pendingCount === 0 && /^[1-8]$/.test(kw)) {
     const idx = Number(kw) - 1;
     const cmd = MENU_COMMANDS[idx];
@@ -470,7 +432,6 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     }
   }
 
-  // ─── Greetings ───
   if (isGreeting(bodyTrim)) {
     const lines = [
       'SEER',
@@ -487,16 +448,13 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     return;
   }
 
-  // ─── Menu commands ───
   if (MENU_COMMANDS.includes(kw)) {
     await handleMenuCommand(c, kw, send, from);
     return;
   }
 
-  // ─── Clear / done ───
   if (kw === 'clear') {
-    c.run('DELETE FROM pending_images WHERE sender = ?', [from]);
-    persist(c);
+    await run(c, 'DELETE FROM pending_images WHERE sender = ?', [from]);
     await send('Cleared. Send new photos when ready.');
     return;
   }
@@ -506,14 +464,26 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     return;
   }
 
-  // ─── Media ───
   if (mediaUrl) {
     try {
-      c.run('INSERT INTO pending_images (sender, url) VALUES (?, ?)', [from, mediaUrl]);
-      persist(c);
-      const count = Number(
-        (rowsOf(c, 'SELECT COUNT(*) AS n FROM pending_images WHERE sender = ?', [from])[0]?.n as number) ?? 0
+      const existingRows = await rowsOf<{ n: number }>(
+        c,
+        'SELECT COUNT(*) AS n FROM pending_images WHERE sender = ?',
+        [from]
       );
+      const existingCount = Number(existingRows[0]?.n ?? 0);
+      if (existingCount > 20) {
+        await run(c, 'DELETE FROM pending_images WHERE sender = ?', [from]);
+      }
+
+      await run(c, 'INSERT INTO pending_images (sender, url) VALUES (?, ?)', [from, mediaUrl]);
+
+      const countRows = await rowsOf<{ n: number }>(
+        c,
+        'SELECT COUNT(*) AS n FROM pending_images WHERE sender = ?',
+        [from]
+      );
+      const count = Number(countRows[0]?.n ?? 0);
       await log('image.buffered', { from, count, channel });
       await send(`Page ${count} received. Send more, or reply "done" to read them all.`);
       return;
@@ -525,7 +495,6 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     }
   }
 
-  // ─── SERA fallback ───
   if (bodyTrim.length >= 4 && !mediaUrl) {
     try {
       await log('sera.asked', { from, question: bodyTrim.slice(0, 120) });
@@ -533,7 +502,7 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
 
       const { askSera } = await import('./sera');
 
-      const history = rowsOf(
+      const history = await rowsOf<Record<string, any>>(
         c,
         `SELECT direction, body, channel, sender, created_at
          FROM messages
@@ -541,9 +510,11 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
          ORDER BY id DESC
          LIMIT 8`,
         [channel, from]
-      ).reverse();
+      );
 
-      const conversation = history
+      const ordered = history.reverse();
+
+      const conversation = ordered
         .filter((m: any) => m.body && m.body !== '…')
         .map((m: any) => ({
           role: (m.direction === 'in' ? 'user' : 'assistant') as 'user' | 'assistant',
@@ -566,7 +537,6 @@ export async function handleInbound(msg: InboundMessage): Promise<void> {
     }
   }
 
-  // ─── Static fallback ───
   await send(
     [
       'SEER',
@@ -615,7 +585,7 @@ async function handleMenuCommand(
   }
 
   if (cmd === 'review') {
-    const rows = rowsOf(
+    const rows = await rowsOf<Record<string, any>>(
       c,
       `SELECT id, section, payload_json, confidence, reason, created_at
        FROM staging_rows
@@ -629,9 +599,11 @@ async function handleMenuCommand(
       return;
     }
 
-    const total = Number(
-      (rowsOf(c, "SELECT COUNT(*) AS n FROM staging_rows WHERE status = 'pending'")[0]?.n as number) ?? 0
+    const totalRows = await rowsOf<{ n: number }>(
+      c,
+      "SELECT COUNT(*) AS n FROM staging_rows WHERE status = 'pending'"
     );
+    const total = Number(totalRows[0]?.n ?? 0);
 
     const lines = [`SEER — ${total} row(s) need review`, ''];
 
@@ -641,7 +613,6 @@ async function handleMenuCommand(
       const conf = r.confidence !== null && r.confidence !== undefined
         ? ` (${Math.round(Number(r.confidence) * 100)}%)`
         : '';
-
       const preview = previewStagedRow(section, p);
       lines.push(`${i + 1}. [${section}]${conf} ${preview}`);
     });
@@ -663,15 +634,22 @@ async function handleMenuCommand(
   }
 
   if (cmd === 'stock') {
-    const products = rowsOf(c, 'SELECT id, name, unit FROM products');
+    const products = await rowsOf<Record<string, any>>(
+      c,
+      'SELECT id, name, unit FROM products'
+    );
     if (!products.length) {
       await send('No products tracked yet. Send a photo of your ledger.');
       return;
     }
     const lines = ['SEER — Stock Status', ''];
     for (const p of products) {
-      const s = rowsOf(c, 'SELECT COALESCE(SUM(quantity),0) AS stock FROM stock_events WHERE product_id = ?', [p.id]);
-      const d = rowsOf(
+      const s = await rowsOf<{ stock: number }>(
+        c,
+        'SELECT COALESCE(SUM(quantity),0) AS stock FROM stock_events WHERE product_id = ?',
+        [p.id]
+      );
+      const d = await rowsOf<{ demand: number }>(
         c,
         `SELECT COALESCE(SUM(quantity),0)/7.0 AS demand FROM sales
          WHERE product_id = ? AND sold_at >= datetime('now','-7 days')`,
@@ -690,7 +668,7 @@ async function handleMenuCommand(
   }
 
   if (cmd === 'owed') {
-    const rows = rowsOf(
+    const rows = await rowsOf<Record<string, any>>(
       c,
       `SELECT r.amount, r.due_date, cu.name AS customer_name
        FROM receivables r JOIN customers cu ON cu.id = r.customer_id
@@ -767,15 +745,17 @@ async function handleMenuCommand(
 
       const { bytes, hash } = await buildStatementPdf();
 
-      const fs = await import('fs');
-      const path = await import('path');
-      const dir = path.join(process.cwd(), 'public', 'statements');
-      fs.mkdirSync(dir, { recursive: true });
+      const b64 = Buffer.from(bytes).toString('base64');
       const filename = `statement-${Date.now()}.pdf`;
-      fs.writeFileSync(path.join(dir, filename), Buffer.from(bytes));
+      const c2 = await db();
+      await run(
+        c2,
+        'INSERT OR REPLACE INTO statement_files (hash, filename, bytes_b64) VALUES (?, ?, ?)',
+        [hash, filename, b64]
+      );
 
       const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000';
-      const pdfUrl = `${baseUrl}/statements/${filename}`;
+      const pdfUrl = `${baseUrl}/api/statements/${hash}`;
       const verifyUrl = `${baseUrl}/verify/${hash}`;
 
       await send(
@@ -824,7 +804,10 @@ async function handleMenuCommand(
   }
 
   if (cmd === 'history') {
-    const events = rowsOf(c, 'SELECT type, created_at FROM activity ORDER BY id DESC LIMIT 10');
+    const events = await rowsOf<Record<string, any>>(
+      c,
+      'SELECT type, created_at FROM activity ORDER BY id DESC LIMIT 10'
+    );
     if (!events.length) {
       await send('No activity yet.');
       return;
@@ -842,7 +825,7 @@ async function handleBatch(
   from: string,
   channel: string
 ): Promise<void> {
-  const images = rowsOf(
+  const images = await rowsOf<Record<string, any>>(
     c,
     'SELECT url FROM pending_images WHERE sender = ? ORDER BY id ASC',
     [from]
@@ -854,8 +837,8 @@ async function handleBatch(
 
   const urls: string[] = images.map((i: any) => String(i.url));
   const kinds = urls.map(urlKind);
-  const pdfCount = kinds.filter((kind) => kind === 'pdf').length;
-  const imageCount = kinds.filter((kind) => kind === 'image').length;
+  const pdfCount = kinds.filter((k) => k === 'pdf').length;
+  const imageCount = kinds.filter((k) => k === 'image').length;
 
   if (pdfCount > 0 && imageCount > 0) {
     await send(
@@ -865,9 +848,7 @@ async function handleBatch(
   }
 
   if (pdfCount > 1) {
-    await send(
-      `You've sent ${pdfCount} PDFs. Send one PDF at a time, or send photos instead.`
-    );
+    await send(`You've sent ${pdfCount} PDFs. Send one PDF at a time, or send photos instead.`);
     return;
   }
 
@@ -895,13 +876,25 @@ async function handleBatch(
       console.warn('[handler] shopKey lookup failed:', e);
     }
 
-    const extracted = await extractRecord(
-      dataUrl,
-      shopKey ? { shopKey } : undefined
-    );
+    const extracted = await extractRecord(dataUrl, shopKey ? { shopKey } : undefined);
 
-    // ─── Persist staged rows ───
-    const staged = (extracted as any).staged ?? [];
+    const rawStaged = (extracted as any).staged ?? [];
+    const seen = new Set<string>();
+    const staged: any[] = [];
+    for (const s of rawStaged) {
+      const e = s.entry ?? {};
+      const key = [
+        e.kind ?? '',
+        e.item ?? e.name ?? '',
+        e.qty ?? '',
+        e.amount ?? '',
+        e.raw_text ?? '',
+      ].join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      staged.push(s);
+    }
+
     if (staged.length) {
       const crypto = await import('crypto');
       const batchHash = crypto
@@ -913,7 +906,8 @@ async function handleBatch(
       for (let i = 0; i < staged.length; i++) {
         const s = staged[i];
         try {
-          c.run(
+          await run(
+            c,
             `INSERT INTO staging_rows
              (batch_hash, source_label, section, row_index, payload_json, confidence, flags_json, status, reason)
              VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
@@ -932,7 +926,6 @@ async function handleBatch(
           console.warn('[handler] staged insert failed:', e);
         }
       }
-      persist(c);
       await log('staged.saved', { count: staged.length, channel });
     }
 
@@ -942,8 +935,7 @@ async function handleBatch(
       `${channel}:batch`
     );
 
-    c.run('DELETE FROM pending_images WHERE sender = ?', [from]);
-    persist(c);
+    await run(c, 'DELETE FROM pending_images WHERE sender = ?', [from]);
 
     const lines = [
       `Read ${images.length} page(s).`,
@@ -959,7 +951,11 @@ async function handleBatch(
       lines.push(`Held back:    ${staged.length} (notes, totals, unclassified)`);
     }
 
-    if (staged.length > 0) {
+    if (result.productsAdded > 15 && (result.salesAdded ?? 0) === 0) {
+      lines.push('');
+      lines.push('Note: I read stock items but no sales rows on these pages.');
+      lines.push('If those pages list sales, type "clear" and send them again one at a time.');
+    } else if (staged.length > 0) {
       lines.push('');
       lines.push('Type "review" to see what was held back.');
     } else if (result.risksQueued > 0) {

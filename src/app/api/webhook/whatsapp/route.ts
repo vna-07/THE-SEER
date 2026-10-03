@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import { handleInbound } from '@/lib/handler';
 import { seenMessage, timingSafeEqual } from '@/lib/security';
 
@@ -7,7 +8,6 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
-  // ─── Optional shared-secret header ───
   const expected = process.env.WHAPI_WEBHOOK_SECRET;
   if (expected) {
     const got = req.headers.get('x-seer-secret') ?? req.headers.get('x-whapi-secret') ?? '';
@@ -41,16 +41,20 @@ export async function POST(req: NextRequest) {
   const mediaUrl = msg.image?.link ?? msg.image?.url ?? null;
   const mediaType = mediaUrl ? 'image/jpeg' : null;
 
-  await handleInbound({
-    channel: 'whatsapp',
-    from,
-    peer: from,
-    body,
-    mediaUrl,
-    mediaType,
-    messageId,
-    raw: payload,
-  });
+  waitUntil(
+    handleInbound({
+      channel: 'whatsapp',
+      from,
+      peer: from,
+      body,
+      mediaUrl,
+      mediaType,
+      messageId,
+      raw: payload,
+    }).catch((e) => {
+      console.error('[whatsapp] handleInbound failed:', e);
+    })
+  );
 
   return NextResponse.json({ ok: true });
 }

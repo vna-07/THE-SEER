@@ -1,7 +1,7 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import fs from 'fs';
 import path from 'path';
-import { db, persist } from './db';
+import { db, run, rowsOf } from './db';
 import { computeRisks } from './engine';
 import { sign, type StatementPayload } from './signature';
 
@@ -31,15 +31,6 @@ function safe(s: unknown): string {
     .replace(/[^\x00-\x7F]/g, '');
 }
 
-function rowsOf(c: any, sql: string, args: unknown[] = []) {
-  const stmt = c.prepare(sql);
-  stmt.bind(args);
-  const out: any[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
-
 function rand(n: number): string {
   return 'R ' + Math.round(n).toLocaleString('en-ZA');
 }
@@ -50,7 +41,6 @@ export async function buildStatementPdf(
 ): Promise<{ bytes: Uint8Array; hash: string; payload: StatementPayload }> {
   const c = await db();
 
-  // ═══════════ DATA ═══════════
   const risks = await computeRisks();
   const totals = risks.reduce(
     (s, r) => ({
@@ -61,31 +51,35 @@ export async function buildStatementPdf(
     { without: 0, with: 0, prevented: 0 }
   );
 
-  const receivablesRows = rowsOf(
+  const receivablesRows = await rowsOf<Record<string, any>>(
     c,
     `SELECT r.amount, r.due_date, c.name AS customer_name
      FROM receivables r JOIN customers c ON c.id = r.customer_id
      WHERE r.status = 'open' ORDER BY r.due_date ASC`
   );
 
-  const salesRows = rowsOf(
+  const salesRows = await rowsOf<Record<string, any>>(
     c,
     `SELECT s.quantity, s.sold_at, p.name AS product_name, p.price AS unit_price
      FROM sales s JOIN products p ON p.id = s.product_id
      ORDER BY s.sold_at DESC LIMIT 500`
   );
 
-  const expenseRows = rowsOf(
+  const expenseRows = await rowsOf<Record<string, any>>(
     c,
     'SELECT date, description, amount FROM expenses ORDER BY date DESC LIMIT 500'
   );
 
-  const products = rowsOf(c, 'SELECT * FROM products');
+  const products = await rowsOf<Record<string, any>>(c, 'SELECT * FROM products');
 
   const stockRows: any[] = [];
   for (const p of products) {
-    const s = rowsOf(c, 'SELECT COALESCE(SUM(quantity),0) AS stock FROM stock_events WHERE product_id = ?', [p.id]);
-    const d = rowsOf(
+    const s = await rowsOf<{ stock: number }>(
+      c,
+      'SELECT COALESCE(SUM(quantity),0) AS stock FROM stock_events WHERE product_id = ?',
+      [p.id]
+    );
+    const d = await rowsOf<{ demand: number }>(
       c,
       `SELECT COALESCE(SUM(quantity),0)/7.0 AS demand FROM sales
        WHERE product_id = ? AND sold_at >= datetime('now','-7 days')`,
@@ -103,7 +97,7 @@ export async function buildStatementPdf(
     });
   }
 
-  const recordRows = rowsOf(c, 'SELECT id FROM records ORDER BY id ASC');
+  const recordRows = await rowsOf<{ id: number }>(c, 'SELECT id FROM records ORDER BY id ASC');
   const recordIds = recordRows.map((r) => Number(r.id));
 
   const salesTotal = salesRows.reduce(
@@ -147,14 +141,15 @@ export async function buildStatementPdf(
   const verifyUrl = `${baseUrl}/verify/${hash}`;
 
   try {
-    c.run(
+    await run(
+      c,
       'INSERT OR IGNORE INTO signed_statements (hash, payload_json, period_from, period_to) VALUES (?, ?, ?, ?)',
       [hash, JSON.stringify(payload), periodFrom, periodTo]
     );
-    persist(c);
-  } catch {}
+  } catch (e) {
+    console.warn('[statement-pdf] signed_statements insert failed:', e);
+  }
 
-  // ═══════════ PDF SETUP ═══════════
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -167,26 +162,41 @@ export async function buildStatementPdf(
     if (fs.existsSync(logoPath)) {
       logo = await pdf.embedPng(fs.readFileSync(logoPath));
     }
-  } catch { logo = null; }
+  } catch {
+    logo = null;
+  }
 
-  // ═══════════ PAGE 1 — COVER ═══════════
+  // ═══ PAGE 1 — COVER ═══
   const cover = pdf.addPage([W, H]);
   cover.drawRectangle({ x: 0, y: H - 260, width: W, height: 260, color: EMERALD });
   cover.drawRectangle({ x: 0, y: H - 266, width: W, height: 6, color: LIME });
 
   if (logo) {
     const scale = Math.min(60 / logo.width, 60 / logo.height);
-    cover.drawImage(logo, { x: M, y: H - 100, width: logo.width * scale, height: logo.height * scale });
+    cover.drawImage(logo, {
+      x: M,
+      y: H - 100,
+      width: logo.width * scale,
+      height: logo.height * scale,
+    });
   }
 
   cover.drawText('SEER', { x: M + 72, y: H - 68, size: 28, font: bold, color: LIME });
   cover.drawText(safe('Small Enterprise Early-Warning & Response'), {
-    x: M + 72, y: H - 88, size: 8, font, color: rgb(0.8, 0.87, 0.84),
+    x: M + 72,
+    y: H - 88,
+    size: 8,
+    font,
+    color: rgb(0.8, 0.87, 0.84),
   });
 
   cover.drawText('FINANCIAL STATEMENT', { x: M, y: H - 160, size: 30, font: bold, color: WHITE });
   cover.drawText(safe('Statement of Account & Trading Position'), {
-    x: M, y: H - 184, size: 10, font, color: rgb(0.85, 0.92, 0.89),
+    x: M,
+    y: H - 184,
+    size: 10,
+    font,
+    color: rgb(0.85, 0.92, 0.89),
   });
 
   let y = H - 300;
@@ -196,10 +206,18 @@ export async function buildStatementPdf(
 
   cover.drawText('PERIOD', { x: W - M - 200, y, size: 8, font: bold, color: MUTED });
   cover.drawText(safe(`${periodFrom} - ${periodTo}`), {
-    x: W - M - 200, y: y - 16, size: 12, font: monoBold, color: INK,
+    x: W - M - 200,
+    y: y - 16,
+    size: 12,
+    font: monoBold,
+    color: INK,
   });
   cover.drawText(safe(`Generated ${new Date(generatedAt).toLocaleString('en-ZA', { hour12: false })}`), {
-    x: W - M - 200, y: y - 34, size: 8, font, color: MUTED,
+    x: W - M - 200,
+    y: y - 34,
+    size: 8,
+    font,
+    color: MUTED,
   });
 
   y = H - 400;
@@ -207,7 +225,11 @@ export async function buildStatementPdf(
   cover.drawText('EXPOSURE PREVENTED', { x: M + 20, y: y + 12, size: 9, font: bold, color: EMERALD });
   cover.drawText(rand(totals.prevented), { x: M + 20, y: y - 32, size: 32, font: monoBold, color: EMERALD });
   cover.drawText(safe('7-day projection - loss without intervention minus loss with'), {
-    x: M + 20, y: y - 52, size: 8, font, color: MUTED,
+    x: M + 20,
+    y: y - 52,
+    size: 8,
+    font,
+    color: MUTED,
   });
 
   y = H - 520;
@@ -221,7 +243,10 @@ export async function buildStatementPdf(
     const x = M + i * colW;
     cover.drawText(it.label, { x, y, size: 7.5, font: bold, color: MUTED });
     cover.drawText(it.value, {
-      x, y: y - 20, size: 14, font: monoBold,
+      x,
+      y: y - 20,
+      size: 14,
+      font: monoBold,
       color: it.tone === 'red' ? RED : INK,
     });
   });
@@ -237,226 +262,172 @@ export async function buildStatementPdf(
   cover.drawText('Verify at:', { x: M + 16, y: sigY + 12, size: 7, font: bold, color: MUTED });
   cover.drawText(safe(verifyUrl), { x: M + 16, y: sigY + 2, size: 7, font: mono, color: EMERALD });
 
-  // ═══════════ PAGINATED CONTENT ═══════════
-  // A Cursor instance handles y-advance, page-break, and safe() wrapping.
-  class Cursor {
-    page: any;
-    y: number;
-    constructor(page: any) { this.page = page; this.y = HEADER_BOTTOM; }
-
-    ensureRoom(needed: number, title: string, periodFrom: string, periodTo: string) {
-      if (this.y - needed < FOOTER_Y + 40) {
-        this.page = pdf.addPage([W, H]);
-        drawHeader(this.page, title, periodFrom, periodTo, logo, LIME, EMERALD, WHITE, font, bold);
-        this.y = HEADER_BOTTOM;
-      }
-    }
-
-    text(text: string, opts: any = {}) {
-      this.page.drawText(safe(text), {
-        x: opts.x ?? M,
-        y: this.y,
-        size: opts.size ?? 10,
-        font: opts.f ?? font,
-        color: opts.color ?? INK,
-      });
-      if (!opts.noAdvance) this.y -= (opts.size ?? 10) + 4;
-    }
-
-    line(x1 = M, x2 = W - M) {
-      this.page.drawLine({ start: { x: x1, y: this.y }, end: { x: x2, y: this.y }, thickness: 0.5, color: HAIR });
-      this.y -= 10;
-    }
-
-    gap(n = 10) { this.y -= n; }
-  }
-
   // ═══ PAGE 2 — INCOME STATEMENT ═══
   const p2 = pdf.addPage([W, H]);
-  drawHeader(p2, 'Income Statement', periodFrom, periodTo, logo, LIME, EMERALD, WHITE, font, bold);
-  const c1 = new Cursor(p2);
+  drawHeader(p2, 'Income Statement', periodFrom, periodTo, logo, LIME, EMERALD, font, bold);
+  let y2 = HEADER_BOTTOM;
 
-  c1.text('REVENUE', { size: 9, f: bold, color: EMERALD });
-  c1.gap(2);
-  c1.text(`Sales (all lines)                    ${rand(salesTotal)}`, { f: mono });
-  c1.gap(4);
-  c1.line(M, W - M - 180);
-  c1.text(`Total revenue                        ${rand(salesTotal)}`, { f: monoBold });
+  const write2 = (text: string, opts: any = {}) => {
+    p2.drawText(safe(text), {
+      x: opts.x ?? M,
+      y: y2,
+      size: opts.size ?? 10,
+      font: opts.f ?? font,
+      color: opts.color ?? INK,
+    });
+    y2 -= (opts.size ?? 10) + 5;
+  };
 
-  c1.gap(18);
-  c1.text('EXPENSES', { size: 9, f: bold, color: EMERALD });
-  c1.gap(2);
+  write2('REVENUE', { size: 9, f: bold, color: EMERALD });
+  y2 -= 2;
+  write2(`Sales (all lines)                    ${rand(salesTotal)}`, { f: mono });
+  y2 -= 4;
+  p2.drawLine({ start: { x: M, y: y2 }, end: { x: W - M - 180, y: y2 }, thickness: 0.5, color: HAIR });
+  y2 -= 12;
+  write2(`Total revenue                        ${rand(salesTotal)}`, { f: monoBold });
+
+  y2 -= 18;
+  write2('EXPENSES', { size: 9, f: bold, color: EMERALD });
+  y2 -= 2;
   for (const e of expenseRows) {
-    c1.ensureRoom(16, 'Income Statement (continued)', periodFrom, periodTo);
+    if (y2 < M + 60) break;
     const desc = String(e.description).slice(0, 32).padEnd(34);
-    c1.text(`${desc} ${rand(Number(e.amount))}`, { f: mono, size: 9 });
+    write2(`${desc} ${rand(Number(e.amount))}`, { f: mono, size: 9 });
   }
-  if (expenseRows.length === 0) c1.text('No expenses recorded.', { f: font, size: 9, color: MUTED });
-
-  c1.gap(4);
-  c1.line(M, W - M - 180);
-  c1.text(`Total expenses                       ${rand(expensesTotal)}`, { f: monoBold });
-
-  c1.gap(20);
-  c1.ensureRoom(40, 'Income Statement (continued)', periodFrom, periodTo);
-  c1.page.drawRectangle({ x: M, y: c1.y - 4, width: W - 2 * M, height: 26, color: EMERALD_SOFT });
-  c1.y += 6;
-  c1.text(`NET POSITION                         ${rand(netPosition)}`, {
-    f: monoBold, size: 12, color: netPosition < 0 ? RED : EMERALD,
+  if (expenseRows.length === 0) write2('No expenses recorded.', { f: font, size: 9, color: MUTED });
+  y2 -= 4;
+  p2.drawLine({ start: { x: M, y: y2 }, end: { x: W - M - 180, y: y2 }, thickness: 0.5, color: HAIR });
+  y2 -= 12;
+  write2(`Total expenses                       ${rand(expensesTotal)}`, { f: monoBold });
+  y2 -= 20;
+  p2.drawRectangle({ x: M, y: y2 - 4, width: W - 2 * M, height: 26, color: EMERALD_SOFT });
+  y2 += 6;
+  write2(`NET POSITION                         ${rand(netPosition)}`, {
+    f: monoBold,
+    size: 12,
+    color: netPosition < 0 ? RED : EMERALD,
   });
 
   // ═══ PAGE 3 — BALANCE SHEET ═══
   const p3 = pdf.addPage([W, H]);
-  drawHeader(p3, 'Balance Sheet', periodFrom, periodTo, logo, LIME, EMERALD, WHITE, font, bold);
-  const c2 = new Cursor(p3);
+  drawHeader(p3, 'Balance Sheet', periodFrom, periodTo, logo, LIME, EMERALD, font, bold);
+  let y3 = HEADER_BOTTOM;
 
-  c2.text('ASSETS', { size: 9, f: bold, color: EMERALD });
-  c2.gap(2);
-  c2.text(`Stock on hand                        ${rand(stockValue)}`, { f: mono });
-  c2.text(`Receivables (owed to business)       ${rand(receivablesTotal)}`, { f: mono });
-  c2.gap(4);
-  c2.line(M, W - M - 180);
-  c2.text(`Total assets                         ${rand(stockValue + receivablesTotal)}`, { f: monoBold });
-
-  c2.gap(20);
-  c2.text('WORKING CAPITAL VIEW', { size: 9, f: bold, color: EMERALD });
-  c2.gap(2);
-  c2.text(`Cash in (sales, period)              ${rand(salesTotal)}`, { f: mono, size: 9 });
-  c2.text(`Cash out (expenses, period)          ${rand(expensesTotal)}`, { f: mono, size: 9 });
-  c2.gap(4);
-  c2.line(M, W - M - 180);
-  c2.text(`Net cash                             ${rand(netPosition)}`, {
-    f: monoBold, color: netPosition < 0 ? RED : INK,
-  });
-
-  c2.gap(20);
-  c2.text('HOW THIS IS CALCULATED', { size: 9, f: bold, color: EMERALD });
-  c2.gap(4);
-  c2.text('Stock value = sum of (quantity on hand x unit price)', { f: font, size: 8, color: MUTED });
-  c2.text('Receivables = sum of all open customer balances', { f: font, size: 8, color: MUTED });
-  c2.text('Net cash = total sales - total expenses for the period', { f: font, size: 8, color: MUTED });
-  c2.gap(6);
-  c2.text('Every figure above traces to a source record. See page 4 for the schedules.', {
-    f: font, size: 8, color: MUTED,
-  });
-
-  // ═══ PAGE 4+ — SCHEDULES ═══
-  const p4 = pdf.addPage([W, H]);
-  drawHeader(p4, 'Schedules', periodFrom, periodTo, logo, LIME, EMERALD, WHITE, font, bold);
-  const c3 = new Cursor(p4);
-
-  const sectionHeader = (title: string) => {
-    c3.ensureRoom(40, 'Schedules (continued)', periodFrom, periodTo);
-    c3.page.drawRectangle({ x: M, y: c3.y - 3, width: 3, height: 12, color: LIME });
-    c3.page.drawText(safe(title), { x: M + 10, y: c3.y, size: 9, font: bold, color: EMERALD });
-    c3.y -= 16;
+  const write3 = (text: string, opts: any = {}) => {
+    p3.drawText(safe(text), {
+      x: opts.x ?? M,
+      y: y3,
+      size: opts.size ?? 10,
+      font: opts.f ?? font,
+      color: opts.color ?? INK,
+    });
+    y3 -= (opts.size ?? 10) + 5;
   };
 
-  // ─── RECEIVABLES ───
-  sectionHeader('RECEIVABLES OUTSTANDING');
-  c3.page.drawText('Customer', { x: M, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Amount', { x: M + 250, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Due', { x: M + 350, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Age', { x: M + 445, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.y -= 12;
+  write3('ASSETS', { size: 9, f: bold, color: EMERALD });
+  y3 -= 2;
+  write3(`Stock on hand                        ${rand(stockValue)}`, { f: mono });
+  write3(`Receivables (owed to business)       ${rand(receivablesTotal)}`, { f: mono });
+  y3 -= 4;
+  p3.drawLine({ start: { x: M, y: y3 }, end: { x: W - M - 180, y: y3 }, thickness: 0.5, color: HAIR });
+  y3 -= 12;
+  write3(`Total assets                         ${rand(stockValue + receivablesTotal)}`, { f: monoBold });
+
+  y3 -= 20;
+  write3('WORKING CAPITAL VIEW', { size: 9, f: bold, color: EMERALD });
+  y3 -= 2;
+  write3(`Cash in (sales, period)              ${rand(salesTotal)}`, { f: mono, size: 9 });
+  write3(`Cash out (expenses, period)          ${rand(expensesTotal)}`, { f: mono, size: 9 });
+  y3 -= 4;
+  p3.drawLine({ start: { x: M, y: y3 }, end: { x: W - M - 180, y: y3 }, thickness: 0.5, color: HAIR });
+  y3 -= 12;
+  write3(`Net cash                             ${rand(netPosition)}`, {
+    f: monoBold,
+    color: netPosition < 0 ? RED : INK,
+  });
+
+  y3 -= 20;
+  write3('HOW THIS IS CALCULATED', { size: 9, f: bold, color: EMERALD });
+  y3 -= 4;
+  write3('Stock value = sum of (quantity on hand x unit price)', { f: font, size: 8, color: MUTED });
+  write3('Receivables = sum of all open customer balances', { f: font, size: 8, color: MUTED });
+  write3('Net cash = total sales - total expenses for the period', { f: font, size: 8, color: MUTED });
+  y3 -= 6;
+  write3('Every figure above traces to a source record. See page 4 for the schedules.', {
+    f: font,
+    size: 8,
+    color: MUTED,
+  });
+
+  // ═══ PAGE 4 — SCHEDULES ═══
+  const p4 = pdf.addPage([W, H]);
+  drawHeader(p4, 'Schedules', periodFrom, periodTo, logo, LIME, EMERALD, font, bold);
+  let y4 = HEADER_BOTTOM;
+
+  const section4 = (title: string) => {
+    p4.drawRectangle({ x: M, y: y4 - 3, width: 3, height: 12, color: LIME });
+    p4.drawText(safe(title), { x: M + 10, y: y4, size: 9, font: bold, color: EMERALD });
+    y4 -= 16;
+  };
+
+  section4('RECEIVABLES OUTSTANDING');
+  p4.drawText('Customer', { x: M, y: y4, size: 7.5, font: bold, color: MUTED });
+  p4.drawText('Amount', { x: M + 250, y: y4, size: 7.5, font: bold, color: MUTED });
+  p4.drawText('Due', { x: M + 350, y: y4, size: 7.5, font: bold, color: MUTED });
+  p4.drawText('Age', { x: M + 445, y: y4, size: 7.5, font: bold, color: MUTED });
+  y4 -= 12;
 
   if (payload.receivables.length === 0) {
-    c3.text('None outstanding.', { f: font, size: 9, color: MUTED });
+    p4.drawText('None outstanding.', { x: M, y: y4, size: 9, font, color: MUTED });
+    y4 -= 16;
   } else {
-    for (const r of payload.receivables) {
-      c3.ensureRoom(16, 'Schedules (continued)', periodFrom, periodTo);
-      c3.page.drawText(safe(r.customer.slice(0, 32)), { x: M, y: c3.y, size: 9, font, color: INK });
-      c3.page.drawText(safe(rand(r.amount)), { x: M + 250, y: c3.y, size: 9, font: mono, color: INK });
-      c3.page.drawText(safe(r.dueDate), { x: M + 350, y: c3.y, size: 9, font: mono, color: INK });
-      c3.page.drawText(safe(`${r.ageDays}d`), {
-        x: M + 445, y: c3.y, size: 9, font: monoBold,
+    for (const r of payload.receivables.slice(0, 20)) {
+      if (y4 < M + 60) break;
+      p4.drawText(safe(r.customer.slice(0, 32)), { x: M, y: y4, size: 9, font, color: INK });
+      p4.drawText(safe(rand(r.amount)), { x: M + 250, y: y4, size: 9, font: mono, color: INK });
+      p4.drawText(safe(r.dueDate), { x: M + 350, y: y4, size: 9, font: mono, color: INK });
+      p4.drawText(safe(`${r.ageDays}d`), {
+        x: M + 445,
+        y: y4,
+        size: 9,
+        font: monoBold,
         color: r.ageDays >= 14 ? RED : INK,
       });
-      c3.y -= 13;
+      y4 -= 13;
     }
   }
 
-  c3.gap(20);
+  y4 -= 20;
+  section4('STOCK ON HAND');
+  p4.drawText('Product', { x: M, y: y4, size: 7.5, font: bold, color: MUTED });
+  p4.drawText('Stock', { x: M + 220, y: y4, size: 7.5, font: bold, color: MUTED });
+  p4.drawText('Demand/d', { x: M + 280, y: y4, size: 7.5, font: bold, color: MUTED });
+  p4.drawText('Value', { x: M + 380, y: y4, size: 7.5, font: bold, color: MUTED });
+  p4.drawText('Days', { x: M + 460, y: y4, size: 7.5, font: bold, color: MUTED });
+  y4 -= 12;
 
-  // ─── STOCK ───
-  sectionHeader('STOCK ON HAND');
-  c3.page.drawText('Product', { x: M, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Stock', { x: M + 220, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Demand/d', { x: M + 280, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Value', { x: M + 380, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Days', { x: M + 460, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.y -= 12;
-
-  for (const s of stockRows) {
-    c3.ensureRoom(16, 'Schedules (continued)', periodFrom, periodTo);
-    c3.page.drawText(safe(s.product.slice(0, 30)), { x: M, y: c3.y, size: 9, font, color: INK });
-    c3.page.drawText(safe(String(s.stock)), { x: M + 220, y: c3.y, size: 9, font: mono, color: INK });
-    c3.page.drawText(safe(s.demand.toFixed(2)), { x: M + 280, y: c3.y, size: 9, font: mono, color: INK });
-    c3.page.drawText(safe(rand(s.stock * s.unitPrice)), { x: M + 380, y: c3.y, size: 9, font: mono, color: INK });
+  for (const s of stockRows.slice(0, 20)) {
+    if (y4 < M + 60) break;
+    p4.drawText(safe(s.product.slice(0, 30)), { x: M, y: y4, size: 9, font, color: INK });
+    p4.drawText(safe(String(s.stock)), { x: M + 220, y: y4, size: 9, font: mono, color: INK });
+    p4.drawText(safe(s.demand.toFixed(2)), { x: M + 280, y: y4, size: 9, font: mono, color: INK });
+    p4.drawText(safe(rand(s.stock * s.unitPrice)), { x: M + 380, y: y4, size: 9, font: mono, color: INK });
     const days = s.daysLeft >= 999 ? 'n/a' : s.daysLeft.toFixed(1);
-    c3.page.drawText(days, {
-      x: M + 460, y: c3.y, size: 9, font: monoBold,
+    p4.drawText(days, {
+      x: M + 460,
+      y: y4,
+      size: 9,
+      font: monoBold,
       color: s.daysLeft < 2 ? RED : INK,
     });
-    c3.y -= 13;
-  }
-  if (stockRows.length === 0) c3.text('No products tracked.', { f: font, size: 9, color: MUTED });
-
-  c3.gap(20);
-
-  // ─── SALES ───
-  sectionHeader('SALES (LAST 30)');
-  c3.page.drawText('Item', { x: M, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Date', { x: M + 220, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Qty', { x: M + 300, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Unit R', { x: M + 350, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.page.drawText('Total', { x: M + 430, y: c3.y, size: 7.5, font: bold, color: MUTED });
-  c3.y -= 12;
-
-  if (salesRows.length === 0) {
-    c3.text('No sales recorded.', { f: font, size: 9, color: MUTED });
-  } else {
-    for (const s of salesRows.slice(0, 100)) {
-      c3.ensureRoom(16, 'Schedules (continued)', periodFrom, periodTo);
-      const lineTotal = Number(s.quantity) * Number(s.unit_price ?? 0);
-      c3.page.drawText(safe(String(s.product_name).slice(0, 30)), { x: M, y: c3.y, size: 9, font, color: INK });
-      c3.page.drawText(safe(String(s.sold_at).slice(0, 10)), { x: M + 220, y: c3.y, size: 9, font: mono, color: INK });
-      c3.page.drawText(safe(String(s.quantity)), { x: M + 300, y: c3.y, size: 9, font: mono, color: INK });
-      c3.page.drawText(safe(rand(Number(s.unit_price ?? 0))), { x: M + 350, y: c3.y, size: 9, font: mono, color: INK });
-      c3.page.drawText(safe(rand(lineTotal)), { x: M + 430, y: c3.y, size: 9, font: mono, color: INK });
-      c3.y -= 13;
-    }
-    if (salesRows.length > 100) {
-      c3.text(`... and ${salesRows.length - 100} more sales not shown`, { f: font, size: 8, color: MUTED });
-    }
+    y4 -= 13;
   }
 
-  c3.gap(20);
-
-  // ─── VERIFICATION ───
-  sectionHeader('VERIFICATION');
-  c3.text('Every figure above is derived from source records that have been signed.', {
-    f: font, size: 9,
-  });
-  c3.gap(2);
-  c3.text(`Record IDs: ${recordIds.join(', ') || 'none'}`, { f: mono, size: 9, color: MUTED });
-  c3.gap(2);
-  c3.text('To verify this statement, open:', { f: font, size: 9, color: MUTED });
-  c3.text(verifyUrl, { f: mono, size: 9, color: EMERALD });
-  c3.gap(2);
-  c3.text('If any value above is changed, the signature will no longer match.', {
-    f: font, size: 9, color: MUTED,
-  });
-  c3.text('Nothing was sent to any supplier or customer without explicit owner approval.', {
-    f: font, size: 9, color: MUTED,
-  });
-
-  // ═══════════ STAMP PAGE NUMBERS ON EVERY PAGE ═══════════
+  // ═══ FOOTERS ═══
   const totalPages = pdf.getPageCount();
   for (let i = 0; i < totalPages; i++) {
     const p = pdf.getPage(i);
-    const label = `Page ${i + 1} of ${totalPages}`;
-    p.drawText(safe(label), {
+    p.drawText(safe(`Page ${i + 1} of ${totalPages}`), {
       x: W - M - 70,
       y: FOOTER_Y,
       size: 7,
@@ -484,7 +455,6 @@ function drawHeader(
   logo: any,
   lime: any,
   emerald: any,
-  white: any,
   font: any,
   bold: any
 ) {
