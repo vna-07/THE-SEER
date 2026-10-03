@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
       mediaUrl,
       mediaType,
       messageId,
-      raw: payload,
+      raw: payload,   
     }).catch((e) => {
       console.error('[telegram] handleInbound failed:', e);
     })

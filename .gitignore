@@ -52,3 +52,9 @@ scripts/*.bak
 .vercel
 .env*
 public/intro-original.mp4
+messy.pdf
+split/
+payload.json
+test-page.jpg
+ocr-response.json
+dev.log
