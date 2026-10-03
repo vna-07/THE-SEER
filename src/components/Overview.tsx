@@ -1,5 +1,9 @@
 'use client';
 
+import TrendChart from './TrendChart';
+import TopMovers from './TopMovers';
+import { Icon } from './Icon';
+
 function fmtRand(value: number): string {
   return new Intl.NumberFormat('en-ZA', {
     style: 'currency',
@@ -34,12 +38,13 @@ export default function Overview({
         <div style={{ position: 'relative', zIndex: 1 }}>
           <div
             className="badge dark"
-            style={{ marginBottom: '0.75rem', fontSize: '0.7rem' }}
+            style={{ marginBottom: '0.75rem', fontSize: '0.65rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
           >
-            🛡️ Exposure Prevented · 7-Day Projection
+            <Icon name="shield" size={12} />
+            Exposure Prevented · 7-Day Projection
           </div>
 
-          <div className="headline mono" style={{ color: 'var(--accent-lime)' }}>
+          <div className="headline mono" style={{ color: 'var(--accent)', fontSize: '3.75rem' }}>
             {fmtRand(totals.prevented)}
           </div>
 
@@ -99,7 +104,7 @@ export default function Overview({
           }}
         >
           <div>
-            <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, letterSpacing: '-0.02em' }}>
+            <h2 className="serif" style={{ margin: 0, fontSize: '1.6rem', fontWeight: 400, letterSpacing: '-0.02em' }}>
               Act Today
             </h2>
             <p className="small muted" style={{ margin: '0.15rem 0 0' }}>
@@ -192,10 +197,18 @@ export default function Overview({
 
           {risks.length === 0 && (
             <div className="glass card muted small" style={{ gridColumn: 'span 3' }}>
+              <div style={{ color: 'var(--accent)', marginBottom: '0.75rem' }}>
+                <Icon name="trending" size={32} strokeWidth={1.2} />
+              </div>
               No active risks. Send a photo on WhatsApp to seed data.
             </div>
           )}
         </div>
+      </section>
+
+      {/* TOP MOVERS + FINANCIALS */}
+      <section style={{ marginBottom: '1.5rem' }}>
+        <TopMovers state={state} />
       </section>
 
       {/* ACTIVITY */}
@@ -245,6 +258,10 @@ export default function Overview({
           )}
         </div>
       </section>
+
+      <div style={{ marginTop: '1rem' }}>
+        <TrendChart records={state.records ?? []} />
+      </div>
     </>
   );
 }

@@ -1,8 +1,14 @@
 import { migrate } from '../src/lib/db';
+import { runMigrations } from '../src/lib/migrations';
 
-migrate()
-  .then(() => console.log('Migrated. Tables created in data/seer.db'))
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  });
+async function main() {
+  await migrate();
+  await runMigrations();
+  console.log('Migrated. Tables + column additions applied.');
+  process.exit(0);
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

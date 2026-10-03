@@ -37,6 +37,30 @@ export type ExtractedReceivable = {
   customerName: string;
   amount: number;
   dueDate?: string;
+  phone?: string;
+  confidence: number;
+};
+
+export type ExtractedSale = {
+  date?: string;
+  item: string;
+  quantity: number;
+  unitPrice?: number;
+  total?: number;
+  notes?: string;
+  confidence: number;
+};
+
+export type ExtractedExpense = {
+  date?: string;
+  description: string;
+  amount: number;
+  confidence: number;
+};
+
+export type ExtractedOrder = {
+  item: string;
+  quantity: number;
   confidence: number;
 };
 
@@ -56,5 +80,8 @@ export type ExtractedRecord = {
   products: ExtractedProduct[];
   suppliers: ExtractedSupplier[];
   receivables: ExtractedReceivable[];
+  sales?: ExtractedSale[];
+  expenses?: ExtractedExpense[];
+  orders?: ExtractedOrder[];
   ocr: OcrResult;
 };

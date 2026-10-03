@@ -35,7 +35,7 @@ export async function GET() {
 
   const records = rowsOf(
     c,
-    'SELECT id, image_path, extracted_json, confidence_json, ocr_text, created_at FROM records ORDER BY id DESC LIMIT 20'
+    'SELECT id, image_path, source, extracted_json, confidence_json, ocr_text, record_date, page_type, created_at FROM records ORDER BY id DESC LIMIT 20'
   );
 
   const activity = rowsOf(
@@ -45,7 +45,7 @@ export async function GET() {
 
   const messages = rowsOf(
     c,
-    'SELECT id, direction, body, created_at FROM messages ORDER BY id DESC LIMIT 30'
+    'SELECT id, direction, body, channel, sender, created_at FROM messages ORDER BY id DESC LIMIT 30'
   );
 
   const counts = {
@@ -53,7 +53,36 @@ export async function GET() {
     receivables: (rowsOf(c, "SELECT COUNT(*) AS n FROM receivables WHERE status = 'open'")[0]?.n as number) ?? 0,
     records: (rowsOf(c, 'SELECT COUNT(*) AS n FROM records')[0]?.n as number) ?? 0,
     actionsPending: (rowsOf(c, "SELECT COUNT(*) AS n FROM actions WHERE status = 'pending'")[0]?.n as number) ?? 0,
+    stagingPending: (rowsOf(c, "SELECT COUNT(*) AS n FROM staging_rows WHERE status = 'pending'")[0]?.n as number) ?? 0,
   };
+
+  const topMovers = rowsOf(
+    c,
+    `SELECT p.name AS name, p.unit AS unit,
+            COALESCE(SUM(s.quantity), 0) AS units,
+            COALESCE(SUM(s.quantity * p.price), 0) AS revenue
+     FROM sales s
+     JOIN products p ON p.id = s.product_id
+     WHERE s.sold_at >= datetime('now', '-30 days')
+     GROUP BY p.id
+     ORDER BY units DESC
+     LIMIT 5`
+  );
+
+  const expensesSum =
+    (rowsOf(c, 'SELECT COALESCE(SUM(amount), 0) AS n FROM expenses')[0]?.n as number) ?? 0;
+
+  const salesSum =
+    (rowsOf(
+      c,
+      `SELECT COALESCE(SUM(s.quantity * p.price), 0) AS n
+       FROM sales s JOIN products p ON p.id = s.product_id
+       WHERE s.sold_at >= datetime('now', '-30 days')`
+    )[0]?.n as number) ?? 0;
+
+  const settingsRows = rowsOf(c, 'SELECT key, value FROM settings');
+  const settings: Record<string, string> = {};
+  for (const row of settingsRows) settings[String(row.key)] = String(row.value);
 
   return NextResponse.json({
     risks,
@@ -63,6 +92,13 @@ export async function GET() {
     activity,
     messages,
     counts,
+    topMovers,
+    financials: {
+      salesLast30: Math.round(salesSum),
+      expensesAll: Math.round(expensesSum),
+      netPosition: Math.round(salesSum - expensesSum),
+    },
+    settings,
     generatedAt: new Date().toISOString(),
   });
 }

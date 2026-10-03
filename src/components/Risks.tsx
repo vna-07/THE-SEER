@@ -34,7 +34,7 @@ export default function Risks({
         }}
       >
         <div>
-          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 800, letterSpacing: '-0.02em' }}>
+          <h1 className="serif" style={{ margin: 0, fontSize: '2rem', fontWeight: 400, letterSpacing: '-0.02em' }}>
             Risk Matrix
           </h1>
           <p className="small muted" style={{ margin: '0.15rem 0 0' }}>

@@ -42,3 +42,9 @@ next-env.d.ts
 payload.json
 test-page.jpg
 ocr-response.json
+data/*.db
+data/*.db-*
+dev.log
+public/statements/*.pdf
+scripts/*.bak
+*.log

@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { fmtRand } from '@/lib/ui';
+import { Icon } from './Icon';
 
 export default function Simulation({ state }: { state: any }) {
   const [demandMult, setDemandMult] = useState(1.0);
@@ -70,7 +71,7 @@ export default function Simulation({ state }: { state: any }) {
         }}
       >
         <div>
-          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 800, letterSpacing: '-0.02em' }}>
+          <h1 className="serif" style={{ margin: 0, fontSize: '2rem', fontWeight: 400, letterSpacing: '-0.02em' }}>
             7-Day Projections
           </h1>
           <p className="small muted" style={{ margin: '0.15rem 0 0' }}>
@@ -86,9 +87,13 @@ export default function Simulation({ state }: { state: any }) {
           style={{
             background: shock ? 'var(--critical)' : undefined,
             color: shock ? '#fff' : undefined,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.45rem',
           }}
         >
-          {shock ? '⚡ Shock Active' : '⚡ Inject Business Shock'}
+          <Icon name="bolt" size={14} />
+          {shock ? 'Shock Active' : 'Inject Business Shock'}
         </button>
       </div>
 
@@ -198,7 +203,14 @@ export default function Simulation({ state }: { state: any }) {
               </div>
             );
           })}
-          {simulated.length === 0 && <div className="muted small">No risks to project.</div>}
+          {simulated.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '2rem 1rem' }}>
+              <div style={{ color: 'var(--accent)', marginBottom: '0.75rem' }}>
+                <Icon name="trending" size={32} strokeWidth={1.2} />
+              </div>
+              <div className="muted small">No risks to project.</div>
+            </div>
+          )}
         </div>
       </section>
     </>

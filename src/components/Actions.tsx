@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { Icon } from './Icon';
 
 type Status = 'pending' | 'approved' | 'executed';
 
@@ -12,7 +13,7 @@ export default function Actions({ state }: { state: any }) {
   return (
     <>
       <div style={{ marginBottom: '1rem', padding: '0 0.25rem' }}>
-        <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 800, letterSpacing: '-0.02em' }}>
+        <h1 className="serif" style={{ margin: 0, fontSize: '2rem', fontWeight: 400, letterSpacing: '-0.02em' }}>
           Action Hub
         </h1>
         <p className="small muted" style={{ margin: '0.15rem 0 0' }}>
@@ -88,9 +89,16 @@ export default function Actions({ state }: { state: any }) {
                 <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
                   <button
                     className="btn-primary"
-                    style={{ flex: 1 }}
+                    style={{
+                      flex: 1,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '0.4rem',
+                    }}
                     onClick={() => approve(a.id)}
                   >
+                    <Icon name="check" size={14} />
                     Approve & Send
                   </button>
                   <button
@@ -113,7 +121,16 @@ export default function Actions({ state }: { state: any }) {
         })}
 
         {filtered.length === 0 && (
-          <div className="glass card muted small">Nothing here yet.</div>
+          <div className="glass card muted small" style={{ textAlign: 'center', padding: '2.5rem 1.5rem' }}>
+            <div style={{ color: 'var(--accent)', marginBottom: '0.75rem' }}>
+              <Icon
+                name={tab === 'pending' ? 'package' : tab === 'approved' ? 'check' : 'arrowRight'}
+                size={32}
+                strokeWidth={1.2}
+              />
+            </div>
+            Nothing here yet.
+          </div>
         )}
       </div>
     </>
