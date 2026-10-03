@@ -142,14 +142,14 @@ async function resolveProduct(
     return { productId: pid, wasCreated: false };
   }
 
-  // 2. Base + size match
+  // 2. Base + size match (case-insensitive on both sides)
   const baseNorm = normaliseForMatch(base);
   if (baseNorm) {
     const existing = await rowsOf<{ id: number }>(
       c,
       `SELECT id FROM products
        WHERE LOWER(base_name) = LOWER(?)
-         AND COALESCE(size, '') = COALESCE(?, '')`,
+         AND LOWER(COALESCE(size, '')) = LOWER(COALESCE(?, ''))`,
       [baseNorm, size]
     );
     if (existing.length) {

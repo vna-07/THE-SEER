@@ -670,23 +670,56 @@ async function handleMenuCommand(
   if (cmd === 'owed') {
     const rows = await rowsOf<Record<string, any>>(
       c,
-      `SELECT r.amount, r.due_date, cu.name AS customer_name
+      `SELECT r.amount, r.due_date, r.recorded_at, cu.name AS customer_name
        FROM receivables r JOIN customers cu ON cu.id = r.customer_id
-       WHERE r.status = 'open' ORDER BY r.due_date ASC`
+       WHERE r.status = 'open'
+       ORDER BY r.due_date ASC`
     );
+
     if (!rows.length) {
       await send('No outstanding debts. Everyone is paid up.');
       return;
     }
-    const lines = ['SEER — Owed to you', ''];
-    let total = 0;
+
+    // Group by customer, sum amounts, take the oldest age.
+    const byCustomer = new Map<string, { total: number; oldestAge: number }>();
+
     for (const r of rows) {
-      const age = Math.max(0, Math.floor((Date.now() - new Date(r.due_date).getTime()) / 86400000));
-      total += Number(r.amount);
-      lines.push(`${marker(age, true)} ${r.customer_name} — ${fmtRand(Number(r.amount))} · ${age}d`);
+      const name = String(r.customer_name);
+      const amount = Number(r.amount);
+      const dateStr = r.due_date || r.recorded_at;
+      let age = 0;
+      if (dateStr) {
+        const t = new Date(String(dateStr).slice(0, 10)).getTime();
+        if (Number.isFinite(t)) {
+          age = Math.max(0, Math.floor((Date.now() - t) / 86400000));
+        }
+      }
+
+      const existing = byCustomer.get(name);
+      if (existing) {
+        existing.total += amount;
+        existing.oldestAge = Math.max(existing.oldestAge, age);
+      } else {
+        byCustomer.set(name, { total: amount, oldestAge: age });
+      }
     }
+
+    const lines = ['SEER — Owed to you', ''];
+    let grand = 0;
+    const sorted = Array.from(byCustomer.entries()).sort(
+      (a, b) => b[1].oldestAge - a[1].oldestAge
+    );
+
+    for (const [name, info] of sorted) {
+      grand += info.total;
+      lines.push(
+        `${marker(info.oldestAge, true)} ${name} — ${fmtRand(info.total)} · ${info.oldestAge}d`
+      );
+    }
+
     lines.push('');
-    lines.push(`Total: ${fmtRand(total)}`);
+    lines.push(`Total: ${fmtRand(grand)}`);
     await send(lines.join('\n'));
     return;
   }
@@ -746,7 +779,7 @@ async function handleMenuCommand(
       const { bytes, hash } = await buildStatementPdf();
 
       const b64 = Buffer.from(bytes).toString('base64');
-      const filename = `statement-${Date.now()}.pdf`;
+      const filename = `statement-${hash.slice(0, 8)}.pdf`;
       const c2 = await db();
       await run(
         c2,

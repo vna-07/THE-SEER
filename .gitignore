@@ -48,3 +48,6 @@ dev.log
 public/statements/*.pdf
 scripts/*.bak
 *.log
+
+.vercel
+.env*

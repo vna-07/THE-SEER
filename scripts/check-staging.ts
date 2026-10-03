@@ -18,27 +18,31 @@ import path from 'path';
 })();
 
 async function main() {
-  const { db } = await import('../src/lib/db');
+  const { db, rowsOf } = await import('../src/lib/db');
   const c = await db();
 
-  const byStatus = c.exec('SELECT status, COUNT(*) FROM staging_rows GROUP BY status');
+  const byStatus = await rowsOf<{ status: string; n: number }>(
+    c,
+    'SELECT status, COUNT(*) AS n FROM staging_rows GROUP BY status'
+  );
   console.log('── Staging rows by status ──');
-  if (!byStatus[0] || !byStatus[0].values.length) {
+  if (!byStatus.length) {
     console.log('(empty)');
   } else {
-    for (const row of byStatus[0].values) {
-      console.log(`  ${row[0]}: ${row[1]}`);
+    for (const row of byStatus) {
+      console.log(`  ${row.status}: ${row.n}`);
     }
   }
 
-  const recent = c.exec(
-    "SELECT id, section, confidence, reason, substr(payload_json, 1, 80) FROM staging_rows WHERE status = 'pending' ORDER BY id DESC LIMIT 10"
+  const recent = await rowsOf<Record<string, any>>(
+    c,
+    "SELECT id, section, confidence, reason, substr(payload_json, 1, 80) AS snippet FROM staging_rows WHERE status = 'pending' ORDER BY id DESC LIMIT 10"
   );
-  if (recent[0] && recent[0].values.length) {
+  if (recent.length) {
     console.log('\n── Pending (last 10) ──');
-    for (const row of recent[0].values) {
-      console.log(`  #${row[0]} [${row[1]}] conf=${row[2]} reason="${row[3]}"`);
-      console.log(`      ${String(row[4]).replace(/\n/g, ' ')}`);
+    for (const row of recent) {
+      console.log(`  #${row.id} [${row.section}] conf=${row.confidence} reason="${row.reason}"`);
+      console.log(`      ${String(row.snippet).replace(/\n/g, ' ')}`);
     }
   }
 
