@@ -5,15 +5,18 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 export default function ScanAnimation({
   imageUrl,
   ocrText,
+  stillLoading = false,
   durationMs = 4000,
   onComplete,
 }: {
   imageUrl: string;
   ocrText?: string | null;
+  stillLoading?: boolean;
   durationMs?: number;
   onComplete?: () => void;
 }) {
   const [progress, setProgress] = useState(0);
+  const [loops, setLoops] = useState(0);
   const startedAt = useRef<number>(0);
 
   useEffect(() => {
@@ -27,16 +30,22 @@ export default function ScanAnimation({
 
       if (p < 1) {
         raf = requestAnimationFrame(tick);
-      } else if (onComplete) {
-        onComplete();
+      } else {
+        // Finished one pass. If still waiting for extraction, reset and loop.
+        if (stillLoading) {
+          setLoops((l) => l + 1);
+          startedAt.current = performance.now();
+          raf = requestAnimationFrame(tick);
+        } else if (onComplete) {
+          onComplete();
+        }
       }
     }
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [durationMs, onComplete]);
+  }, [durationMs, stillLoading, onComplete]);
 
-  // Real OCR lines, if we have them. Otherwise placeholders.
   const lines = useMemo(() => {
     if (ocrText && ocrText.trim().length > 0) {
       return ocrText.split('\n').filter((l) => l.trim().length > 0);
@@ -64,38 +73,26 @@ export default function ScanAnimation({
     <div className="scan-wrap">
       <style>{SCAN_CSS}</style>
 
-      {/* ─── PAGE IMAGE WITH SCAN LINE ─── */}
       <div className="scan-page">
         <img src={imageUrl} alt="" className="scan-page-img" draggable={false} />
 
-        {/* Fade bands: dims above and below the scan line */}
-        <div
-          className="scan-fade scan-fade-top"
-          style={{ height: `${progress * 100}%` }}
-        />
-        <div
-          className="scan-fade scan-fade-bot"
-          style={{ top: `${progress * 100}%`, height: `${(1 - progress) * 100}%` }}
-        />
+        <div className="scan-fade scan-fade-top" style={{ height: `${progress * 100}%` }} />
+        <div className="scan-fade scan-fade-bot" style={{ top: `${progress * 100}%`, height: `${(1 - progress) * 100}%` }} />
 
-        {/* The scan line itself */}
         <div className="scan-line" style={{ top: `${progress * 100}%` }} />
 
-        {/* Faint grid overlay for texture */}
         <div className="scan-grid" />
 
-        {/* Corner brackets */}
         <span className="scan-corner scan-tl" />
         <span className="scan-corner scan-tr" />
         <span className="scan-corner scan-bl" />
         <span className="scan-corner scan-br" />
       </div>
 
-      {/* ─── TRANSCRIPTION PANEL ─── */}
       <div className="scan-text">
         <div className="scan-text-header">
           <span className="scan-pulse" />
-          <span>OCR · transcribing</span>
+          <span>{stillLoading ? `OCR · pass ${loops + 1}` : 'OCR · transcribing'}</span>
           <span className="scan-pct">{Math.round(progress * 100)}%</span>
         </div>
 
@@ -104,7 +101,7 @@ export default function ScanAnimation({
             const isLatest = i === visibleLines.length - 1;
             return (
               <div
-                key={i}
+                key={`${loops}-${i}`}
                 className={`scan-text-line ${isLatest ? 'scan-text-line-latest' : ''}`}
               >
                 <span className="scan-text-bullet">›</span>
@@ -117,9 +114,12 @@ export default function ScanAnimation({
               <span className="scan-caret" />
             </div>
           )}
-          {progress >= 1 && (
-            <div className="scan-done">
-              ✓ extraction complete
+          {!stillLoading && progress >= 1 && (
+            <div className="scan-done">✓ extraction complete</div>
+          )}
+          {stillLoading && loops > 0 && (
+            <div className="scan-done" style={{ color: 'var(--accent)' }}>
+              refining layout…
             </div>
           )}
         </div>
@@ -140,7 +140,6 @@ const SCAN_CSS = `
   min-height: 380px;
 }
 
-/* ─── PAGE ─── */
 .scan-page {
   position: relative;
   overflow: hidden;
@@ -159,7 +158,6 @@ const SCAN_CSS = `
   opacity: 0.9;
 }
 
-/* Fades above and below the scan line — the "unread" regions */
 .scan-fade {
   position: absolute;
   left: 0;
@@ -171,44 +169,34 @@ const SCAN_CSS = `
 .scan-fade-top { top: 0; }
 .scan-fade-bot { bottom: 0; }
 
-/* The moving scan line */
 .scan-line {
   position: absolute;
   left: 0;
   right: 0;
   height: 2px;
-  background: linear-gradient(
-    90deg,
-    rgba(242, 196, 107, 0) 0%,
-    rgba(242, 196, 107, 0.9) 50%,
-    rgba(242, 196, 107, 0) 100%
-  );
-  box-shadow:
-    0 0 12px rgba(242, 196, 107, 0.8),
-    0 0 24px rgba(242, 196, 107, 0.4);
+  background: linear-gradient(90deg, rgba(242,196,107,0) 0%, rgba(242,196,107,0.9) 50%, rgba(242,196,107,0) 100%);
+  box-shadow: 0 0 12px rgba(242,196,107,0.8), 0 0 24px rgba(242,196,107,0.4);
   pointer-events: none;
   transform: translateY(-1px);
   transition: top 80ms linear;
 }
 
-/* Faint tech grid */
 .scan-grid {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(242, 196, 107, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(242, 196, 107, 0.05) 1px, transparent 1px);
+    linear-gradient(rgba(242,196,107,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(242,196,107,0.05) 1px, transparent 1px);
   background-size: 24px 24px;
   pointer-events: none;
   mix-blend-mode: screen;
 }
 
-/* Corner brackets */
 .scan-corner {
   position: absolute;
   width: 16px;
   height: 16px;
-  border: 2px solid rgba(242, 196, 107, 0.7);
+  border: 2px solid rgba(242,196,107,0.7);
   pointer-events: none;
 }
 .scan-tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
@@ -216,7 +204,6 @@ const SCAN_CSS = `
 .scan-bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
 .scan-br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
 
-/* ─── TEXT PANEL ─── */
 .scan-text {
   display: flex;
   flex-direction: column;
@@ -280,28 +267,14 @@ const SCAN_CSS = `
   color: #F2C46B;
 }
 
-.scan-text-bullet {
-  color: #F2C46B;
-  opacity: 0.6;
-  flex-shrink: 0;
-}
+.scan-text-bullet { color: #F2C46B; opacity: 0.6; flex-shrink: 0; }
 
 @keyframes scanLineIn {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-    filter: blur(3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
-  }
+  from { opacity: 0; transform: translateY(4px); filter: blur(3px); }
+  to   { opacity: 1; transform: translateY(0); filter: blur(0); }
 }
 
-.scan-text-caret {
-  padding-top: 0.25rem;
-}
+.scan-text-caret { padding-top: 0.25rem; }
 
 .scan-caret {
   display: inline-block;
@@ -320,7 +293,7 @@ const SCAN_CSS = `
 .scan-done {
   margin-top: 0.5rem;
   padding-top: 0.75rem;
-  border-top: 1px solid rgba(242, 196, 107, 0.15);
+  border-top: 1px solid rgba(242,196,107,0.15);
   color: #4FCF8A;
   font-weight: 700;
   font-size: 0.75rem;
@@ -330,16 +303,5 @@ const SCAN_CSS = `
 @media (max-width: 700px) {
   .scan-wrap { grid-template-columns: 1fr; }
   .scan-page-img { max-height: 240px; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .scan-line,
-  .scan-pulse,
-  .scan-caret {
-    animation-duration: 200ms !important;
-  }
-  .scan-text-line {
-    animation-duration: 100ms !important;
-  }
 }
 `;
