@@ -1,23 +1,8 @@
 'use client';
 
-import TrendChart from './TrendChart';
-import TopMovers from './TopMovers';
+import { useState } from 'react';
+import { fmtRand, timeShort } from '@/lib/ui';
 import { Icon } from './Icon';
-
-function fmtRand(value: number): string {
-  return new Intl.NumberFormat('en-ZA', {
-    style: 'currency',
-    currency: 'ZAR',
-    maximumFractionDigits: 0,
-  }).format(Number(value) || 0);
-}
-
-function timeShort(value: string | number | Date): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? ''
-    : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
 
 export default function Overview({
   state,
@@ -27,9 +12,59 @@ export default function Overview({
   onWhy: (risk: any) => void;
 }) {
   const { totals, counts, risks, activity } = state;
+  const [busy, setBusy] = useState<string | null>(null);
+  const [approved, setApproved] = useState<Set<string>>(new Set());
 
   const sev = (r: any) =>
-    r.exposure.prevented >= 600 ? 'critical' : r.exposure.prevented >= 300 ? 'warning' : 'safe';
+    r.exposure.prevented >= 600
+      ? 'critical'
+      : r.exposure.prevented >= 300
+      ? 'warning'
+      : 'safe';
+
+  // ═══ FIND THE MATCHING ACTION ID FOR A RISK ═══
+  // Overview cards map to `actions` by type + product/customer name.
+  function findActionId(risk: any): number | null {
+    const actions = state.actions ?? [];
+    const draft = risk.actionDraft ?? {};
+
+    for (const a of actions) {
+      if (a.status !== 'pending') continue;
+      try {
+        const p = JSON.parse(a.payload_json);
+        if (
+          (a.type === 'purchase_order' &&
+            p.productName === draft.productName) ||
+          (a.type === 'reminder' && p.customerName === draft.customerName)
+        ) {
+          return a.id as number;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  async function approveRisk(risk: any) {
+    const id = findActionId(risk);
+    if (!id) {
+      alert('No matching pending action found. This risk may already be approved.');
+      return;
+    }
+
+    setBusy(risk.id);
+    try {
+      const res = await fetch(`/api/actions/${id}/approve`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(err || 'approve failed');
+      }
+      setApproved((prev) => new Set(prev).add(risk.id));
+    } catch (e: any) {
+      alert('Approve failed: ' + String(e?.message ?? e));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   return (
     <>
@@ -38,13 +73,22 @@ export default function Overview({
         <div style={{ position: 'relative', zIndex: 1 }}>
           <div
             className="badge dark"
-            style={{ marginBottom: '0.75rem', fontSize: '0.65rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
+            style={{
+              marginBottom: '0.75rem',
+              fontSize: '0.65rem',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+            }}
           >
             <Icon name="shield" size={12} />
             Exposure Prevented · 7-Day Projection
           </div>
 
-          <div className="headline mono" style={{ color: 'var(--accent)', fontSize: '3.75rem' }}>
+          <div
+            className="headline mono"
+            style={{ color: 'var(--accent)', fontSize: '3.75rem' }}
+          >
             {fmtRand(totals.prevented)}
           </div>
 
@@ -104,7 +148,14 @@ export default function Overview({
           }}
         >
           <div>
-            <h2 className="serif" style={{ margin: 0, fontSize: '1.6rem', fontWeight: 400, letterSpacing: '-0.02em' }}>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: '1.15rem',
+                fontWeight: 800,
+                letterSpacing: '-0.02em',
+              }}
+            >
               Act Today
             </h2>
             <p className="small muted" style={{ margin: '0.15rem 0 0' }}>
@@ -117,15 +168,37 @@ export default function Overview({
         <div className="grid-cards">
           {risks.slice(0, 3).map((r: any) => {
             const s = sev(r);
+            const isApproved = approved.has(r.id);
+            const isBusy = busy === r.id;
+
             return (
               <div
                 key={r.id}
-                className="glass card interactive"
-                style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}
+                className="glass card"
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '1rem',
+                  transition: 'all 220ms ease',
+                  borderColor: isApproved
+                    ? 'rgba(79, 207, 138, 0.5)'
+                    : undefined,
+                  opacity: isApproved ? 0.75 : 1,
+                }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span className={`badge ${s}`}>
-                    {r.type === 'stockout' ? 'Critical Gap' : 'Receivable'}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <span className={`badge ${isApproved ? 'safe' : s}`}>
+                    {isApproved
+                      ? '✓ Approved'
+                      : r.type === 'stockout'
+                      ? 'Critical Gap'
+                      : 'Receivable'}
                   </span>
                   <span className="tiny mono muted">
                     {r.type === 'stockout'
@@ -135,11 +208,24 @@ export default function Overview({
                 </div>
 
                 <div>
-                  <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 800, letterSpacing: '-0.02em' }}>
+                  <h3
+                    style={{
+                      margin: 0,
+                      fontSize: '1.1rem',
+                      fontWeight: 800,
+                      letterSpacing: '-0.02em',
+                      textDecoration: isApproved ? 'line-through' : 'none',
+                    }}
+                  >
                     {r.title}
                   </h3>
-                  <p className="tiny muted" style={{ margin: '0.2rem 0 0', fontWeight: 500 }}>
-                    {r.actionDraft?.supplier ?? r.actionDraft?.customerName ?? ''}
+                  <p
+                    className="tiny muted"
+                    style={{ margin: '0.2rem 0 0', fontWeight: 500 }}
+                  >
+                    {r.actionDraft?.supplier ??
+                      r.actionDraft?.customerName ??
+                      ''}
                   </p>
                 </div>
 
@@ -156,13 +242,23 @@ export default function Overview({
                 >
                   {r.type === 'stockout' ? (
                     <>
-                      <Row k="Stock / Demand" v={`${r.inputs.stock} / ${Number(r.inputs.demand).toFixed(1)}`} />
-                      <Row k="Lead time" v={`${r.inputs.leadTime} days`} tone={s === 'critical' ? 'critical' : undefined} />
+                      <Row
+                        k="Stock / Demand"
+                        v={`${r.inputs.stock} / ${Number(r.inputs.demand).toFixed(1)}`}
+                      />
+                      <Row
+                        k="Lead time"
+                        v={`${r.inputs.leadTime} days`}
+                        tone={s === 'critical' ? 'critical' : undefined}
+                      />
                     </>
                   ) : (
                     <>
                       <Row k="Balance" v={fmtRand(Number(r.inputs.amount))} />
-                      <Row k="Recovery rate" v={`${Math.round(Number(r.inputs.recoveryRate) * 100)}%`} />
+                      <Row
+                        k="Recovery rate"
+                        v={`${Math.round(Number(r.inputs.recoveryRate) * 100)}%`}
+                      />
                     </>
                   )}
                   <div
@@ -178,37 +274,98 @@ export default function Overview({
                     <span>Exposure Prevented</span>
                     <span
                       className="mono"
-                      style={{ color: s === 'critical' ? 'var(--critical)' : 'var(--safe)' }}
+                      style={{
+                        color:
+                          s === 'critical' ? 'var(--critical)' : 'var(--safe)',
+                      }}
                     >
                       {fmtRand(r.exposure.prevented)}
                     </span>
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.4rem',
+                  }}
+                >
                   <button className="btn-ghost" onClick={() => onWhy(r)}>
                     Why this number?
                   </button>
-                  <button className="btn-primary">{r.recommendation}</button>
+                  <button
+                    className="btn-primary"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '0.4rem',
+                      background: isApproved
+                        ? 'var(--safe)'
+                        : undefined,
+                      cursor: isBusy || isApproved ? 'not-allowed' : 'pointer',
+                    }}
+                    disabled={isBusy || isApproved}
+                    onClick={() => approveRisk(r)}
+                  >
+                    {isApproved ? (
+                      <>
+                        <Icon name="check" size={14} />
+                        Approved
+                      </>
+                    ) : isBusy ? (
+                      'Sending…'
+                    ) : (
+                      <>
+                        <Icon name="check" size={14} />
+                        {r.recommendation}
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             );
           })}
 
           {risks.length === 0 && (
-            <div className="glass card muted small" style={{ gridColumn: 'span 3' }}>
-              <div style={{ color: 'var(--accent)', marginBottom: '0.75rem' }}>
-                <Icon name="trending" size={32} strokeWidth={1.2} />
-              </div>
-              No active risks. Send a photo on WhatsApp to seed data.
+            <div
+              className="glass card"
+              style={{
+                gridColumn: 'span 3',
+                textAlign: 'center',
+                padding: '2.5rem 1.5rem',
+              }}
+            >
+              <div style={{ fontSize: '2.5rem', marginBottom: '0.5rem' }}>🌱</div>
+              <h3 style={{ margin: 0, fontWeight: 800, fontSize: '1rem' }}>
+                No risks yet
+              </h3>
+              <p
+                className="small muted"
+                style={{
+                  margin: '0.4rem 0 0',
+                  maxWidth: 420,
+                  marginLeft: 'auto',
+                  marginRight: 'auto',
+                }}
+              >
+                Upload a photo of your ledger, or send it on WhatsApp. SEER reads
+                the page, calculates what matters, and shows the risks here.
+              </p>
+              <button
+                className="btn-dark"
+                style={{ marginTop: '1rem' }}
+                onClick={() => {
+                  const e = new CustomEvent('open-upload');
+                  window.dispatchEvent(e);
+                }}
+              >
+                + Upload a page
+              </button>
             </div>
           )}
         </div>
-      </section>
-
-      {/* TOP MOVERS + FINANCIALS */}
-      <section style={{ marginBottom: '1.5rem' }}>
-        <TopMovers state={state} />
       </section>
 
       {/* ACTIVITY */}
@@ -241,14 +398,27 @@ export default function Overview({
           />
         </div>
 
-        <div className="mono" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+        <div
+          className="mono"
+          style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}
+        >
           {activity.slice(0, 8).map((a: any) => (
             <div key={a.id} className="activity-row">
-              <span style={{ color: 'var(--accent-emerald)', fontWeight: 700 }}>
+              <span
+                style={{ color: 'var(--accent-emerald)', fontWeight: 700 }}
+              >
                 {timeShort(a.created_at)}
               </span>
-              <span className={`badge ${badgeTone(a.type)}`}>{labelOf(a.type)}</span>
-              <span style={{ color: '#3F3F46', flex: 1, fontFamily: 'var(--font-jakarta)' }}>
+              <span className={`badge ${badgeTone(a.type)}`}>
+                {labelOf(a.type)}
+              </span>
+              <span
+                style={{
+                  color: '#3F3F46',
+                  flex: 1,
+                  fontFamily: 'var(--font-jakarta)',
+                }}
+              >
                 {summariseActivity(a)}
               </span>
             </div>
@@ -258,10 +428,6 @@ export default function Overview({
           )}
         </div>
       </section>
-
-      <div style={{ marginTop: '1rem' }}>
-        <TrendChart records={state.records ?? []} />
-      </div>
     </>
   );
 }
@@ -303,7 +469,10 @@ function HeroStat({
       >
         {label}
       </div>
-      <div className="mono" style={{ fontSize: '1.15rem', fontWeight: 800, color }}>
+      <div
+        className="mono"
+        style={{ fontSize: '1.15rem', fontWeight: 800, color }}
+      >
         {value}
       </div>
       <div
@@ -323,9 +492,24 @@ function HeroStat({
   );
 }
 
-function Row({ k, v, tone }: { k: string; v: string; tone?: 'critical' }) {
+function Row({
+  k,
+  v,
+  tone,
+}: {
+  k: string;
+  v: string;
+  tone?: 'critical';
+}) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: '#52525B' }}>
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        fontSize: '0.78rem',
+        color: '#52525B',
+      }}
+    >
       <span>{k}</span>
       <span
         className="mono"
@@ -348,7 +532,12 @@ function badgeTone(type: string): string {
 }
 
 function labelOf(type: string): string {
-  if (type.includes('ocr') || type.includes('extracted') || type.includes('batch.extracted')) return 'OCR';
+  if (
+    type.includes('ocr') ||
+    type.includes('extracted') ||
+    type.includes('batch.extracted')
+  )
+    return 'OCR';
   if (type.includes('risks')) return 'ENGINE';
   if (type.includes('approved')) return 'APPROVAL';
   if (type.includes('message')) return 'INBOUND';
@@ -360,16 +549,26 @@ function summariseActivity(a: any): string {
   try {
     const d = JSON.parse(a.detail ?? '{}');
     switch (a.type) {
-      case 'message.in':       return `Inbound from ${d.from ?? 'owner'}${d.hasImage ? ' (image)' : ''}`;
-      case 'image.buffered':   return `Image buffered — page ${d.count}`;
-      case 'batch.processing': return `Processing ${d.count} page(s)`;
-      case 'batch.extracted':  return `Extracted ${d.products} products, ${d.receivables} debts from ${d.pages} page(s)`;
-      case 'record.extracted': return `Extracted ${d.products} products, ${d.receivables} debts`;
-      case 'record.failed':    return `Extraction failed: ${d.error}`;
-      case 'risks.updated':    return `${d.count} risks recalculated`;
-      case 'action.approved':  return `Approved: ${Array.isArray(d.ids) ? d.ids.join(', ') : 'all'}`;
-      case 'report.requested': return 'Weekly report requested';
-      default:                 return a.type;
+      case 'message.in':
+        return `Inbound from ${d.from ?? 'owner'}${d.hasImage ? ' (image)' : ''}`;
+      case 'image.buffered':
+        return `Image buffered — page ${d.count}`;
+      case 'batch.processing':
+        return `Processing ${d.count} page(s)`;
+      case 'batch.extracted':
+        return `Extracted ${d.products} products, ${d.receivables} debts from ${d.pages} page(s)`;
+      case 'record.extracted':
+        return `Extracted ${d.products} products, ${d.receivables} debts`;
+      case 'record.failed':
+        return `Extraction failed: ${d.error}`;
+      case 'risks.updated':
+        return `${d.count} risks recalculated`;
+      case 'action.approved':
+        return `Approved: ${Array.isArray(d.ids) ? d.ids.join(', ') : 'all'}`;
+      case 'report.requested':
+        return 'Weekly report requested';
+      default:
+        return a.type;
     }
   } catch {
     return a.type;
