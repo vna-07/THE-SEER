@@ -1,10 +1,11 @@
 'use client';
 
 import { useState } from 'react';
+import ScanAnimation from './ScanAnimation';
 import { Icon } from './Icon';
 
 type Tab = 'upload' | 'manual';
-type Stage = 'input' | 'preview';
+type Stage = 'input' | 'scan' | 'preview';
 
 type EProduct = { name: string; quantity: string; unit: string; price: string };
 type ESale = { date: string; item: string; quantity: string; unitPrice: string; total: string };
@@ -19,6 +20,11 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [ocrSnippet, setOcrSnippet] = useState<string | null>(null);
 
+  // Scan animation state
+  const [scanImage, setScanImage] = useState<string | null>(null);
+  const [scanOcrText, setScanOcrText] = useState<string | null>(null);
+  const [pendingExtract, setPendingExtract] = useState<any>(null);
+
   const today = new Date().toISOString().slice(0, 10);
   const [recordDate, setRecordDate] = useState(today);
 
@@ -27,8 +33,20 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
   const [expenses, setExpenses] = useState<EExpense[]>([]);
   const [receivables, setReceivables] = useState<EReceivable[]>([{ customerName: '', amount: '', dueDate: '' }]);
 
+  // ═══ PHOTO / PDF → SCAN → PREVIEW ═══
   async function handleExtract(file: File) {
-    setBusy(true); setError(null); setMessage(null); setOcrSnippet(null);
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    setOcrSnippet(null);
+
+    // Show the scan animation immediately with the local image
+    const reader = new FileReader();
+    reader.onload = () => {
+      setScanImage(String(reader.result));
+      setStage('scan');
+    };
+    reader.readAsDataURL(file);
 
     const fd = new FormData();
     fd.append('file', file);
@@ -38,45 +56,66 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'extraction failed');
 
-      const p: EProduct[] = (data.products ?? []).map((x: any) => ({
-        name: String(x.name ?? ''),
-        quantity: String(x.quantity ?? ''),
-        unit: String(x.unit ?? ''),
-        price: x.price != null ? String(x.price) : '',
-      }));
-      const s: ESale[] = (data.sales ?? []).map((x: any) => ({
-        date: String(x.date ?? ''),
-        item: String(x.item ?? ''),
-        quantity: String(x.quantity ?? ''),
-        unitPrice: x.unitPrice != null ? String(x.unitPrice) : '',
-        total: x.total != null ? String(x.total) : '',
-      }));
-      const e: EExpense[] = (data.expenses ?? []).map((x: any) => ({
-        date: String(x.date ?? ''),
-        description: String(x.description ?? ''),
-        amount: String(x.amount ?? ''),
-      }));
-      const r: EReceivable[] = (data.receivables ?? []).map((x: any) => ({
-        customerName: String(x.customerName ?? ''),
-        amount: String(x.amount ?? ''),
-        dueDate: String(x.dueDate ?? ''),
-      }));
+      setPendingExtract(data);
+      setScanOcrText(data.ocrSnippet ?? null);
 
-      setProducts(p.length ? p : [{ name: '', quantity: '', unit: '', price: '' }]);
-      setSales(s);
-      setExpenses(e);
-      setReceivables(r.length ? r : [{ customerName: '', amount: '', dueDate: '' }]);
-      setOcrSnippet(data.ocrSnippet ?? '');
-      setStage('preview');
+      // If the scan animation already finished, go straight to preview.
+      // Otherwise, the animation's onComplete will pull us there.
+      // (Handled in onScanComplete below.)
     } catch (err: any) {
       setError(String(err?.message ?? err));
+      setStage('input');
     } finally {
       setBusy(false);
     }
   }
 
+  function onScanComplete() {
+    if (!pendingExtract) {
+      // Extraction still running. Wait — we'll be called again once it lands.
+      return;
+    }
+    populateFromExtraction(pendingExtract);
+    setStage('preview');
+  }
+
+  function populateFromExtraction(data: any) {
+    const p: EProduct[] = (data.products ?? []).map((x: any) => ({
+      name: String(x.name ?? ''),
+      quantity: String(x.quantity ?? ''),
+      unit: String(x.unit ?? ''),
+      price: x.price != null ? String(x.price) : '',
+    }));
+    const s: ESale[] = (data.sales ?? []).map((x: any) => ({
+      date: String(x.date ?? ''),
+      item: String(x.item ?? ''),
+      quantity: String(x.quantity ?? ''),
+      unitPrice: x.unitPrice != null ? String(x.unitPrice) : '',
+      total: x.total != null ? String(x.total) : '',
+    }));
+    const e: EExpense[] = (data.expenses ?? []).map((x: any) => ({
+      date: String(x.date ?? ''),
+      description: String(x.description ?? ''),
+      amount: String(x.amount ?? ''),
+    }));
+    const r: EReceivable[] = (data.receivables ?? []).map((x: any) => ({
+      customerName: String(x.customerName ?? ''),
+      amount: String(x.amount ?? ''),
+      dueDate: String(x.dueDate ?? ''),
+    }));
+
+    setProducts(p.length ? p : [{ name: '', quantity: '', unit: '', price: '' }]);
+    setSales(s);
+    setExpenses(e);
+    setReceivables(r.length ? r : [{ customerName: '', amount: '', dueDate: '' }]);
+    setOcrSnippet(data.ocrSnippet ?? '');
+  }
+
+  // ═══ CONFIRM & SAVE ═══
   async function handleConfirm() {
-    setBusy(true); setError(null); setMessage(null);
+    setBusy(true);
+    setError(null);
+    setMessage(null);
 
     const cleanProducts = products
       .filter((p) => p.name.trim())
@@ -151,39 +190,27 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
-      <div onClick={(e) => e.stopPropagation()} className="glass" style={{ background: 'rgba(255,255,255,0.96)', borderRadius: '2rem', padding: '1.5rem', maxWidth: 820, width: '100%', maxHeight: '92vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
+      <div onClick={(e) => e.stopPropagation()} className="glass" style={{ background: 'rgba(31, 28, 25, 0.97)', borderRadius: '2rem', padding: '1.5rem', maxWidth: 900, width: '100%', maxHeight: '94vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div>
-            <div className="tiny" style={{ textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 800, color: 'var(--accent-emerald)' }}>
-              {stage === 'preview' ? 'Review & correct' : 'Add data'}
+            <div className="label" style={{ color: 'var(--accent)' }}>
+              {stage === 'scan' ? 'Scanning page' : stage === 'preview' ? 'Review & correct' : 'Add data'}
             </div>
             <h3 style={{ margin: '0.15rem 0 0', fontSize: '1.15rem', fontWeight: 800 }}>
-              {stage === 'preview' ? 'Confirm extracted data' : 'Upload a page or enter manually'}
+              {stage === 'scan' ? 'Reading your ledger…' : stage === 'preview' ? 'Confirm extracted data' : 'Upload a page or enter manually'}
             </h3>
           </div>
-          <button onClick={onClose} style={{ fontSize: '1.2rem', color: 'var(--text-muted)' }}>✕</button>
+          <button onClick={onClose} style={{ fontSize: '1.2rem', color: 'var(--fg-muted)' }}>
+            <Icon name="x" size={18} />
+          </button>
         </div>
 
         {stage === 'input' && (
           <div className="glass" style={{ borderRadius: '1.5rem', padding: '0.4rem', display: 'inline-flex', gap: '0.25rem', alignSelf: 'flex-start' }}>
             {(['upload', 'manual'] as Tab[]).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                style={{
-                  padding: '0.45rem 1rem',
-                  borderRadius: '999px',
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '0.4rem',
-                  background: tab === t ? 'var(--accent)' : 'transparent',
-                  color: tab === t ? 'var(--bg)' : 'var(--fg-muted)',
-                }}
-              >
+              <button key={t} onClick={() => setTab(t)} style={{ padding: '0.4rem 0.9rem', borderRadius: '1rem', fontSize: '0.75rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '0.4rem', background: tab === t ? 'var(--accent)' : 'transparent', color: tab === t ? 'var(--bg)' : 'var(--fg-muted)' }}>
                 <Icon name={t === 'upload' ? 'camera' : 'file'} size={13} />
                 {t === 'upload' ? 'Upload photo / PDF' : 'Manual entry'}
               </button>
@@ -192,28 +219,51 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
         )}
 
         <div>
-          <label className="small" style={{ fontWeight: 700, display: 'block', marginBottom: '0.3rem' }}>What date is this record from?</label>
-          <input type="date" value={recordDate} onChange={(e) => setRecordDate(e.target.value)} disabled={stage === 'preview'} style={{ width: '100%', padding: '0.6rem 0.8rem', borderRadius: '0.75rem', border: '1px solid var(--border-hair)', background: stage === 'preview' ? 'rgba(240,240,238,0.8)' : 'rgba(255,255,255,0.7)', font: 'inherit' }} />
+          <label className="small" style={{ fontWeight: 700, display: 'block', marginBottom: '0.3rem' }}>
+            What date is this record from?
+          </label>
+          <input type="date" value={recordDate} onChange={(e) => setRecordDate(e.target.value)} disabled={stage !== 'input'} style={{ width: '100%', padding: '0.6rem 0.8rem', borderRadius: '0.75rem', border: '1px solid var(--border-hair)', background: stage !== 'input' ? 'rgba(240,240,238,0.1)' : 'rgba(255,255,255,0.06)', color: 'var(--fg)', font: 'inherit' }} />
         </div>
 
+        {/* ═══ STAGE: INPUT (upload drop zone) ═══ */}
         {stage === 'input' && tab === 'upload' && (
-          <label style={{ display: 'block', padding: '2rem', border: '2px dashed var(--border-hair)', borderRadius: '1rem', textAlign: 'center', cursor: busy ? 'not-allowed' : 'pointer', background: 'rgba(255,255,255,0.5)' }}>
+          <label style={{ display: 'block', padding: '2.5rem', border: '2px dashed rgba(242, 196, 107, 0.3)', borderRadius: '1rem', textAlign: 'center', cursor: busy ? 'not-allowed' : 'pointer', background: 'rgba(255,255,255,0.02)' }}>
             <div style={{ color: 'var(--accent)', marginBottom: '0.6rem' }}>
-              <Icon name="file" size={28} strokeWidth={1.2} />
+              <Icon name="file" size={32} strokeWidth={1.2} />
             </div>
-            <div className="small" style={{ fontWeight: 700 }}>{busy ? 'Reading…' : 'Click to choose a photo or PDF'}</div>
-            <div className="tiny muted" style={{ marginTop: '0.2rem' }}>JPEG, PNG, WebP, PDF</div>
+            <div className="small" style={{ fontWeight: 700 }}>
+              {busy ? 'Reading…' : 'Click to choose a photo or PDF'}
+            </div>
+            <div className="tiny muted" style={{ marginTop: '0.3rem' }}>
+              JPEG, PNG, WebP, PDF · multi-page supported
+            </div>
             <input type="file" accept="image/*,application/pdf" style={{ display: 'none' }} disabled={busy} onChange={(e) => { const f = e.target.files?.[0]; if (f) handleExtract(f); }} />
           </label>
         )}
 
+        {/* ═══ STAGE: SCAN (animation) ═══ */}
+        {stage === 'scan' && scanImage && (
+          <ScanAnimation
+            imageUrl={scanImage}
+            ocrText={scanOcrText}
+            durationMs={4000}
+            onComplete={onScanComplete}
+          />
+        )}
+
+        {/* ═══ STAGE: PREVIEW (review & correct) ═══ */}
         {stage === 'preview' && ocrSnippet && (
           <details>
-            <summary className="small muted" style={{ cursor: 'pointer', fontWeight: 700 }}>Show raw OCR text</summary>
-            <pre className="mono" style={{ marginTop: '0.5rem', background: '#0B2A1F', color: 'var(--accent-lime)', padding: '0.8rem', borderRadius: '0.9rem', fontSize: '0.7rem', maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>{ocrSnippet}</pre>
+            <summary className="small muted" style={{ cursor: 'pointer', fontWeight: 700 }}>
+              Show raw OCR text
+            </summary>
+            <pre className="mono" style={{ marginTop: '0.5rem', background: '#0B2A1F', color: 'var(--accent-lime)', padding: '0.8rem', borderRadius: '0.9rem', fontSize: '0.7rem', maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
+              {ocrSnippet}
+            </pre>
           </details>
         )}
 
+        {/* ═══ EDITABLE ROWS ═══ */}
         {(stage === 'preview' || (stage === 'input' && tab === 'manual')) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
 
@@ -303,21 +353,12 @@ function GridRow({ children, cols, onRemove }: { children: React.ReactNode; cols
 }
 
 function AddBtn({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      className="btn-ghost"
-      onClick={onClick}
-      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
-    >
-      <Icon name="plus" size={13} />
-      {children}
-    </button>
-  );
+  return <button className="btn-ghost" onClick={onClick} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}><Icon name="plus" size={13} />{children}</button>;
 }
 
 function Input({ value, onChange, placeholder, type = 'text' }: { value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
   return (
-    <input type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} style={{ width: '100%', padding: '0.5rem 0.7rem', borderRadius: '0.6rem', border: '1px solid var(--border-hair)', background: 'rgba(255,255,255,0.7)', font: 'inherit', fontSize: '0.8rem' }} />
+    <input type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} style={{ width: '100%', padding: '0.5rem 0.7rem', borderRadius: '0.6rem', border: '1px solid var(--border-hair)', background: 'rgba(255,255,255,0.06)', color: 'var(--fg)', font: 'inherit', fontSize: '0.8rem' }} />
   );
 }
 
