@@ -4,17 +4,25 @@ import { log } from './activity';
 const SALT = 4289;
 const SESSION_TTL_MINUTES = 20;
 
-export function expectedPasscode(d = new Date()): string {
-  const day = d.getDate();
-  const hour = d.getHours();
+/**
+ * Returns the current date components in SAST (UTC+2).
+ * Works correctly on Vercel (which runs UTC) and on your laptop.
+ */
+function sastNow(): { day: number; hour: number } {
+  const now = new Date();
+  const sast = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+  return { day: sast.getUTCDate(), hour: sast.getUTCHours() };
+}
+
+export function expectedPasscode(): string {
+  const { day, hour } = sastNow();
   const raw = day * 100 + hour + SALT;
   return String((raw * 7) % 10000).padStart(4, '0');
 }
 
-export function passcodeHint(d = new Date()): string {
-  const day = String(d.getDate()).padStart(2, '0');
-  const hour = String(d.getHours()).padStart(2, '0');
-  return `${day}-${hour}`;
+export function passcodeHint(): string {
+  const { day, hour } = sastNow();
+  return `${String(day).padStart(2, '0')}-${String(hour).padStart(2, '0')}`;
 }
 
 export function verifyPasscode(input: string): boolean {
@@ -84,21 +92,32 @@ export async function runSeed(): Promise<{ products: number; receivables: number
 
   const milkId = await insert(
     c,
-    'INSERT INTO products (sku, name, base_name, size, unit, price, cost, supplier_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    ['SKU-1', 'Milk 2L', 'milk', '2l', 'carton', 22, 16, dairyId]
+    'INSERT INTO products (name, base_name, size, unit, price, cost, supplier_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ['Milk 2L', 'milk', '2l', 'carton', 22, 16, dairyId]
   );
+  await run(c, 'UPDATE products SET sku = ? WHERE id = ?', [`SKU-${milkId}`, milkId]);
+
   const maizeId = await insert(
     c,
-    'INSERT INTO products (sku, name, base_name, size, unit, price, cost, supplier_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    ['SKU-2', 'Maize meal 5kg', 'maize meal', '5kg', 'bag', 65, 52, premierId]
+    'INSERT INTO products (name, base_name, size, unit, price, cost, supplier_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ['Maize meal 5kg', 'maize meal', '5kg', 'bag', 65, 52, premierId]
   );
+  await run(c, 'UPDATE products SET sku = ? WHERE id = ?', [`SKU-${maizeId}`, maizeId]);
 
   await run(c, 'INSERT INTO stock_events (product_id, quantity) VALUES (?, ?)', [milkId, 8]);
   await run(c, 'INSERT INTO stock_events (product_id, quantity) VALUES (?, ?)', [maizeId, 10]);
 
   for (let i = 0; i < 7; i++) {
-    await run(c, "INSERT INTO sales (product_id, quantity, sold_at) VALUES (?, ?, datetime('now', ?))", [milkId, 6.2, `-${i} days`]);
-    await run(c, "INSERT INTO sales (product_id, quantity, sold_at) VALUES (?, ?, datetime('now', ?))", [maizeId, 3.5, `-${i} days`]);
+    await run(
+      c,
+      "INSERT INTO sales (product_id, quantity, sold_at) VALUES (?, ?, datetime('now', ?))",
+      [milkId, 6.2, `-${i} days`]
+    );
+    await run(
+      c,
+      "INSERT INTO sales (product_id, quantity, sold_at) VALUES (?, ?, datetime('now', ?))",
+      [maizeId, 3.5, `-${i} days`]
+    );
   }
 
   const dlaminiId = await insert(
