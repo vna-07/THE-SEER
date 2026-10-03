@@ -2,6 +2,15 @@ import { db, rowsOf } from './db';
 import { askText } from './ai';
 
 // ═══════════════════════════════════════════════════════════════
+// REVENUE EXPRESSION — prefers total, falls back to qty × price
+// ═══════════════════════════════════════════════════════════════
+
+const REVENUE_EXPR = `COALESCE(
+  NULLIF(s.total, 0),
+  s.quantity * COALESCE(p.price, 0)
+)`;
+
+// ═══════════════════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════════════════
 
@@ -15,7 +24,7 @@ export type CategorySlice = {
 };
 
 export type DOWPoint = {
-  dow: number;      // 0 = Sunday
+  dow: number;
   label: string;
   avg: number;
   total: number;
@@ -42,8 +51,8 @@ export type AnomalyDay = {
   date: string;
   revenue: number;
   expected: number;
-  deviation: number;   // % above/below expected
-  hint: string;        // "Heritage Day", "month-end", etc.
+  deviation: number;
+  hint: string;
 };
 
 export type BusinessType = {
@@ -63,13 +72,13 @@ export type Analytics = {
     tradingDays: number;
   };
   growth: {
-    weekOverWeek: number;      // %
-    monthOverMonth: number;    // %
-    trend30: number;           // % slope direction
+    weekOverWeek: number;
+    monthOverMonth: number;
+    trend30: number;
   };
-  daily: DailyPoint[];         // last 90 days
-  weekly: DailyPoint[];        // last 12 weeks
-  monthly: MonthlyPoint[];     // last 12 months
+  daily: DailyPoint[];
+  weekly: DailyPoint[];
+  monthly: MonthlyPoint[];
   categories: CategorySlice[];
   dayOfWeek: DOWPoint[];
   forecast7: ForecastPoint[];
@@ -121,29 +130,22 @@ function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return isoDate(d);
-}
-
 export async function getDailyRevenue(days = 90): Promise<DailyPoint[]> {
   const c = await db();
   const rows = await rowsOf<Record<string, any>>(
     c,
     `SELECT
-       date(sold_at) AS date,
-       COALESCE(SUM(quantity * COALESCE(p.price, 0)), 0) AS revenue,
+       date(s.sold_at) AS date,
+       COALESCE(SUM(${REVENUE_EXPR}), 0) AS revenue,
        COUNT(*) AS count
      FROM sales s
      JOIN products p ON p.id = s.product_id
      WHERE s.sold_at >= datetime('now', ?)
-     GROUP BY date(sold_at)
+     GROUP BY date(s.sold_at)
      ORDER BY date ASC`,
     [`-${days} days`]
   );
 
-  // Fill gaps so the chart has a continuous x-axis.
   const byDate = new Map<string, DailyPoint>();
   for (const r of rows) {
     byDate.set(String(r.date), {
@@ -171,7 +173,6 @@ export async function getWeeklyRevenue(weeks = 12): Promise<DailyPoint[]> {
 
   for (const p of daily) {
     const d = new Date(p.date);
-    // ISO week start = Monday
     const day = d.getDay() || 7;
     d.setDate(d.getDate() - (day - 1));
     const key = isoDate(d);
@@ -188,8 +189,8 @@ export async function getMonthlyRevenue(months = 12): Promise<MonthlyPoint[]> {
   const rows = await rowsOf<Record<string, any>>(
     c,
     `SELECT
-       strftime('%Y-%m', sold_at) AS month,
-       COALESCE(SUM(quantity * COALESCE(p.price, 0)), 0) AS revenue,
+       strftime('%Y-%m', s.sold_at) AS month,
+       COALESCE(SUM(${REVENUE_EXPR}), 0) AS revenue,
        COUNT(*) AS count
      FROM sales s
      JOIN products p ON p.id = s.product_id
@@ -213,7 +214,7 @@ export async function getRevenueByCategory(days = 30): Promise<CategorySlice[]> 
   const c = await db();
   const rows = await rowsOf<Record<string, any>>(
     c,
-    `SELECT p.name AS name, s.quantity AS quantity, p.price AS price
+    `SELECT p.name AS name, s.quantity AS quantity, s.total AS total, p.price AS price
      FROM sales s
      JOIN products p ON p.id = s.product_id
      WHERE s.sold_at >= datetime('now', ?)`,
@@ -225,10 +226,10 @@ export async function getRevenueByCategory(days = 30): Promise<CategorySlice[]> 
 
   for (const r of rows) {
     const cat = categorise(String(r.name));
-    const rev = Number(r.quantity) * Number(r.price ?? 0);
+    const rev = Number(r.total ?? 0) || Number(r.quantity ?? 0) * Number(r.price ?? 0);
     const cur = map.get(cat) ?? { revenue: 0, units: 0 };
     cur.revenue += rev;
-    cur.units += Number(r.quantity);
+    cur.units += Number(r.quantity ?? 0);
     map.set(cat, cur);
     total += rev;
   }
@@ -274,7 +275,7 @@ export async function getDayOfWeekPattern(days = 90): Promise<DOWPoint[]> {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// FORECAST — trend + day-of-week seasonality
+// FORECAST
 // ═══════════════════════════════════════════════════════════════
 
 function linearTrend(values: number[]): { slope: number; intercept: number; r2: number } {
@@ -310,9 +311,7 @@ export async function forecastNextDays(horizon = 7): Promise<ForecastPoint[]> {
   const daily = await getDailyRevenue(60);
   const recent = daily.filter((d) => d.count > 0 || d.revenue > 0);
 
-  if (recent.length < 4) {
-    return [];
-  }
+  if (recent.length < 4) return [];
 
   const values = recent.map((d) => d.revenue);
   const { slope, intercept } = linearTrend(values);
@@ -352,7 +351,7 @@ export async function getTopProducts(limit = 10): Promise<TopProduct[]> {
     c,
     `SELECT p.name AS name,
             COALESCE(SUM(s.quantity), 0) AS units,
-            COALESCE(SUM(s.quantity * COALESCE(p.price, 0)), 0) AS revenue,
+            COALESCE(SUM(${REVENUE_EXPR}), 0) AS revenue,
             p.price AS avg_price
      FROM sales s
      JOIN products p ON p.id = s.product_id
@@ -371,7 +370,7 @@ export async function getTopProducts(limit = 10): Promise<TopProduct[]> {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ANOMALY DETECTION (holiday, month-end, payday)
+// ANOMALIES
 // ═══════════════════════════════════════════════════════════════
 
 const SA_HOLIDAYS_2026: Record<string, string> = {
@@ -429,7 +428,7 @@ export async function getAnomalies(days = 60): Promise<AnomalyDay[]> {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// BUSINESS TYPE INFERENCE
+// BUSINESS TYPE
 // ═══════════════════════════════════════════════════════════════
 
 export async function inferBusinessType(): Promise<BusinessType> {
@@ -439,6 +438,9 @@ export async function inferBusinessType(): Promise<BusinessType> {
   }
 
   const total = cats.reduce((s, c) => s + c.revenue, 0);
+  if (total <= 0) {
+    return { type: 'unknown', confidence: 0, reason: 'No revenue recorded.' };
+  }
   const pct = (name: string) =>
     ((cats.find((c) => c.category === name)?.revenue ?? 0) / total) * 100;
 
@@ -450,42 +452,22 @@ export async function inferBusinessType(): Promise<BusinessType> {
   const dairy = pct('Bread & Dairy');
 
   if (hot >= 20) {
-    return {
-      type: 'Tavern / hot food counter',
-      confidence: 0.85,
-      reason: `Hot food is ${hot.toFixed(0)}% of revenue.`,
-    };
+    return { type: 'Tavern / hot food counter', confidence: 0.85, reason: `Hot food is ${hot.toFixed(0)}% of revenue.` };
   }
   if (tobacco >= 25 || drinks >= 40) {
-    return {
-      type: 'Liquor / beverage-led trader',
-      confidence: 0.8,
-      reason: `Tobacco ${tobacco.toFixed(0)}% · Drinks ${drinks.toFixed(0)}%.`,
-    };
+    return { type: 'Liquor / beverage-led trader', confidence: 0.8, reason: `Tobacco ${tobacco.toFixed(0)}% · Drinks ${drinks.toFixed(0)}%.` };
   }
   if (groceries + dairy >= 50) {
-    return {
-      type: 'Spaza / general dealer',
-      confidence: 0.85,
-      reason: `Groceries ${groceries.toFixed(0)}% + Bread & Dairy ${dairy.toFixed(0)}%.`,
-    };
+    return { type: 'Spaza / general dealer', confidence: 0.85, reason: `Groceries ${groceries.toFixed(0)}% + Bread & Dairy ${dairy.toFixed(0)}%.` };
   }
   if (airtime >= 15) {
-    return {
-      type: 'Airtime-heavy convenience shop',
-      confidence: 0.75,
-      reason: `Airtime & Tokens is ${airtime.toFixed(0)}% of revenue.`,
-    };
+    return { type: 'Airtime-heavy convenience shop', confidence: 0.75, reason: `Airtime & Tokens is ${airtime.toFixed(0)}% of revenue.` };
   }
-  return {
-    type: 'General trader',
-    confidence: 0.6,
-    reason: 'Mixed category spread, no dominant line.',
-  };
+  return { type: 'General trader', confidence: 0.6, reason: 'Mixed category spread, no dominant line.' };
 }
 
 // ═══════════════════════════════════════════════════════════════
-// TOP-LEVEL AGGREGATION
+// AGGREGATION
 // ═══════════════════════════════════════════════════════════════
 
 export async function getAnalytics(): Promise<Analytics> {
@@ -524,7 +506,6 @@ export async function getAnalytics(): Promise<Analytics> {
   const wow = sum(prev7) > 0 ? ((sum(last7) - sum(prev7)) / sum(prev7)) * 100 : 0;
   const mom = sum(prev30) > 0 ? ((revenue30 - sum(prev30)) / sum(prev30)) * 100 : 0;
 
-  // Simple slope on 30-day values
   const { slope } = linearTrend(last30.map((p) => p.revenue));
   const trend30 = revenue30 > 0 ? (slope / (revenue30 / 30)) * 100 : 0;
 
