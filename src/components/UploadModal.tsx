@@ -3,8 +3,6 @@
 import { useEffect, useState } from 'react';
 import ScanAnimation from './ScanAnimation';
 import { Icon } from './Icon';
-import { PRESETS } from '@/lib/demo-presets';
-import { getDemoStage, setDemoStage } from '@/lib/demo-mode';
 
 type Tab = 'upload' | 'manual';
 type Stage = 'input' | 'scan' | 'preview';
@@ -25,51 +23,27 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
   const [scanImage, setScanImage] = useState<string | null>(null);
   const [scanOcrText, setScanOcrText] = useState<string | null>(null);
   const [pendingExtract, setPendingExtract] = useState<any>(null);
-  const [demoStageNum, setDemoStageNum] = useState<number | null>(null);
 
   const today = new Date().toISOString().slice(0, 10);
   const [recordDate, setRecordDate] = useState(today);
 
-  const [products, setProducts] = useState<EProduct[]>([{ name: '', quantity: '', unit: '', price: '' }]);
+  const [products, setProducts] = useState<EProduct[]>([
+    { name: '', quantity: '', unit: '', price: '' },
+  ]);
   const [sales, setSales] = useState<ESale[]>([]);
   const [expenses, setExpenses] = useState<EExpense[]>([]);
-  const [receivables, setReceivables] = useState<EReceivable[]>([{ customerName: '', amount: '', dueDate: '' }]);
+  const [receivables, setReceivables] = useState<EReceivable[]>([
+    { customerName: '', amount: '', dueDate: '' },
+  ]);
 
+  // Advance to preview the moment extraction lands.
   useEffect(() => {
     if (stage === 'scan' && pendingExtract) {
       populateFromExtraction(pendingExtract);
       setStage('preview');
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage, pendingExtract]);
-
-  // ═══ DEMO SIMULATION ═══
-  async function simulateDemo(stageNum: number, imageDataUrl: string) {
-    setDemoStageNum(stageNum);
-    setScanImage(imageDataUrl);
-    setScanOcrText(null);
-    setStage('scan');
-
-    // Fake a scan that runs for ~12 seconds, then "delivers" the preset.
-    const fakeOcrLines = PRESETS[stageNum].sales
-      .map((s) => `${s.date} | ${s.item} | ${s.quantity} | R${s.unitPrice} | R${s.total}`)
-      .join('\n');
-
-    // Show progressively richer OCR text over time
-    const t1 = setTimeout(() => setScanOcrText(fakeOcrLines.slice(0, 200)), 2000);
-    const t2 = setTimeout(() => setScanOcrText(fakeOcrLines.slice(0, 500)), 5000);
-    const t3 = setTimeout(() => setScanOcrText(fakeOcrLines.slice(0, 900)), 8000);
-    const t4 = setTimeout(() => {
-      setScanOcrText(fakeOcrLines);
-      setPendingExtract(PRESETS[stageNum]);
-    }, 12000);
-
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
-      clearTimeout(t4);
-    };
-  }
 
   async function handleExtract(file: File) {
     setBusy(true);
@@ -77,28 +51,8 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
     setMessage(null);
     setOcrSnippet(null);
     setPendingExtract(null);
-    setDemoStageNum(null);
 
     const reader = new FileReader();
-
-    // Detect demo filename
-    const isDemo = /^demo[_-]/i.test(file.name);
-    let stageNum: number | null = null;
-    if (isDemo) {
-      if (/demo[_-]?0?2/i.test(file.name)) stageNum = 2;
-      else if (/demo[_-]?0?1/i.test(file.name)) stageNum = 1;
-    }
-
-    if (isDemo && stageNum) {
-      reader.onload = () => {
-        simulateDemo(stageNum!, String(reader.result));
-        setBusy(false);
-      };
-      reader.readAsDataURL(file);
-      return;
-    }
-
-    // Real extraction path
     reader.onload = () => {
       setScanImage(String(reader.result));
       setScanOcrText(null);
@@ -160,31 +114,6 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
     setError(null);
     setMessage(null);
 
-    // DEMO PATH: run the preset seeder
-    if (demoStageNum) {
-      try {
-        const res = await fetch('/api/demo/seed-stage', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ stage: demoStageNum }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? 'seed failed');
-
-        setDemoStage(demoStageNum);
-        setMessage(
-          `Loaded ${data.label} · ${data.sales} sales, ${data.receivables} receivables, ${data.risks} risks.`
-        );
-        setTimeout(onClose, 900);
-      } catch (err: any) {
-        setError(String(err?.message ?? err));
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    // REAL PATH
     const cleanProducts = products
       .filter((p) => p.name.trim())
       .map((p) => ({
@@ -220,6 +149,17 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
         dueDate: r.dueDate || undefined,
       }));
 
+    if (
+      !cleanProducts.length &&
+      !cleanSales.length &&
+      !cleanExpenses.length &&
+      !cleanReceivables.length
+    ) {
+      setError('Nothing to save. Add at least one row.');
+      setBusy(false);
+      return;
+    }
+
     try {
       const res = await fetch('/api/manual', {
         method: 'POST',
@@ -236,9 +176,17 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
       if (!res.ok) throw new Error(data.error ?? 'save failed');
 
       setMessage(
-        `Saved ${data.productsAdded} products, ${data.salesAdded ?? 0} sales, ${data.expensesAdded ?? 0} expenses, ${data.receivablesAdded} receivables.`
+        `Saved ${data.productsAdded} products, ${data.salesAdded ?? 0} sales, ${data.expensesAdded ?? 0} expenses, ${data.receivablesAdded} receivables. ${data.risksQueued} risks recalculated.`
       );
+      setProducts([{ name: '', quantity: '', unit: '', price: '' }]);
+      setSales([]);
+      setExpenses([]);
+      setReceivables([{ customerName: '', amount: '', dueDate: '' }]);
       setStage('input');
+      setScanImage(null);
+      setScanOcrText(null);
+      setPendingExtract(null);
+      setOcrSnippet(null);
     } catch (err: any) {
       setError(String(err?.message ?? err));
     } finally {
@@ -247,16 +195,47 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
-      <div onClick={(e) => e.stopPropagation()} className="glass" style={{ background: 'rgba(31, 28, 25, 0.97)', borderRadius: '2rem', padding: '1.5rem', maxWidth: 900, width: '100%', maxHeight: '94vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 70,
+        background: 'rgba(0,0,0,0.6)',
+        backdropFilter: 'blur(6px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '1rem',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="glass"
+        style={{
+          background: 'rgba(31, 28, 25, 0.97)',
+          borderRadius: '2rem',
+          padding: '1.5rem',
+          maxWidth: 900,
+          width: '100%',
+          maxHeight: '94vh',
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '1rem',
+        }}
+      >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div>
             <div className="label" style={{ color: 'var(--accent)' }}>
               {stage === 'scan' ? 'Scanning page' : stage === 'preview' ? 'Review & correct' : 'Add data'}
             </div>
             <h3 style={{ margin: '0.15rem 0 0', fontSize: '1.15rem', fontWeight: 800 }}>
-              {stage === 'scan' ? 'Reading your ledger…' : stage === 'preview' ? 'Confirm extracted data' : 'Upload a page or enter manually'}
+              {stage === 'scan'
+                ? 'Reading your ledger…'
+                : stage === 'preview'
+                ? 'Confirm extracted data'
+                : 'Upload a page or enter manually'}
             </h3>
           </div>
           <button onClick={onClose} style={{ fontSize: '1.2rem', color: 'var(--fg-muted)' }}>
@@ -265,9 +244,32 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
         </div>
 
         {stage === 'input' && (
-          <div className="glass" style={{ borderRadius: '1.5rem', padding: '0.4rem', display: 'inline-flex', gap: '0.25rem', alignSelf: 'flex-start' }}>
+          <div
+            className="glass"
+            style={{
+              borderRadius: '1.5rem',
+              padding: '0.4rem',
+              display: 'inline-flex',
+              gap: '0.25rem',
+              alignSelf: 'flex-start',
+            }}
+          >
             {(['upload', 'manual'] as Tab[]).map((t) => (
-              <button key={t} onClick={() => setTab(t)} style={{ padding: '0.4rem 0.9rem', borderRadius: '1rem', fontSize: '0.75rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '0.4rem', background: tab === t ? 'var(--accent)' : 'transparent', color: tab === t ? 'var(--bg)' : 'var(--fg-muted)' }}>
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                style={{
+                  padding: '0.4rem 0.9rem',
+                  borderRadius: '1rem',
+                  fontSize: '0.75rem',
+                  fontWeight: 700,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  background: tab === t ? 'var(--accent)' : 'transparent',
+                  color: tab === t ? 'var(--bg)' : 'var(--fg-muted)',
+                }}
+              >
                 <Icon name={t === 'upload' ? 'camera' : 'file'} size={13} />
                 {t === 'upload' ? 'Upload photo / PDF' : 'Manual entry'}
               </button>
@@ -276,14 +278,41 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
         )}
 
         <div>
-          <label className="small" style={{ fontWeight: 700, display: 'block', marginBottom: '0.3rem' }}>
+          <label
+            className="small"
+            style={{ fontWeight: 700, display: 'block', marginBottom: '0.3rem' }}
+          >
             What date is this record from?
           </label>
-          <input type="date" value={recordDate} onChange={(e) => setRecordDate(e.target.value)} disabled={stage !== 'input'} style={{ width: '100%', padding: '0.6rem 0.8rem', borderRadius: '0.75rem', border: '1px solid var(--border-hair)', background: stage !== 'input' ? 'rgba(240,240,238,0.1)' : 'rgba(255,255,255,0.06)', color: 'var(--fg)', font: 'inherit' }} />
+          <input
+            type="date"
+            value={recordDate}
+            onChange={(e) => setRecordDate(e.target.value)}
+            disabled={stage !== 'input'}
+            style={{
+              width: '100%',
+              padding: '0.6rem 0.8rem',
+              borderRadius: '0.75rem',
+              border: '1px solid var(--border-hair)',
+              background: stage !== 'input' ? 'rgba(240,240,238,0.1)' : 'rgba(255,255,255,0.06)',
+              color: 'var(--fg)',
+              font: 'inherit',
+            }}
+          />
         </div>
 
         {stage === 'input' && tab === 'upload' && (
-          <label style={{ display: 'block', padding: '2.5rem', border: '2px dashed rgba(242, 196, 107, 0.3)', borderRadius: '1rem', textAlign: 'center', cursor: busy ? 'not-allowed' : 'pointer', background: 'rgba(255,255,255,0.02)' }}>
+          <label
+            style={{
+              display: 'block',
+              padding: '2.5rem',
+              border: '2px dashed rgba(242, 196, 107, 0.3)',
+              borderRadius: '1rem',
+              textAlign: 'center',
+              cursor: busy ? 'not-allowed' : 'pointer',
+              background: 'rgba(255,255,255,0.02)',
+            }}
+          >
             <div style={{ color: 'var(--accent)', marginBottom: '0.6rem' }}>
               <Icon name="file" size={32} strokeWidth={1.2} />
             </div>
@@ -293,12 +322,26 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
             <div className="tiny muted" style={{ marginTop: '0.3rem' }}>
               JPEG, PNG, WebP, PDF · multi-page supported
             </div>
-            <input type="file" accept="image/*,application/pdf" style={{ display: 'none' }} disabled={busy} onChange={(e) => { const f = e.target.files?.[0]; if (f) handleExtract(f); }} />
+            <input
+              type="file"
+              accept="image/*,application/pdf"
+              style={{ display: 'none' }}
+              disabled={busy}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleExtract(f);
+              }}
+            />
           </label>
         )}
 
         {stage === 'scan' && scanImage && (
-          <ScanAnimation imageUrl={scanImage} ocrText={scanOcrText} stillLoading={!pendingExtract} durationMs={3500} />
+          <ScanAnimation
+            imageUrl={scanImage}
+            ocrText={scanOcrText}
+            stillLoading={!pendingExtract}
+            durationMs={3500}
+          />
         )}
 
         {stage === 'preview' && ocrSnippet && (
@@ -306,7 +349,20 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
             <summary className="small muted" style={{ cursor: 'pointer', fontWeight: 700 }}>
               Show raw OCR text
             </summary>
-            <pre className="mono" style={{ marginTop: '0.5rem', background: '#0B2A1F', color: 'var(--accent-lime)', padding: '0.8rem', borderRadius: '0.9rem', fontSize: '0.7rem', maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
+            <pre
+              className="mono"
+              style={{
+                marginTop: '0.5rem',
+                background: '#0B2A1F',
+                color: 'var(--accent-lime)',
+                padding: '0.8rem',
+                borderRadius: '0.9rem',
+                fontSize: '0.7rem',
+                maxHeight: 200,
+                overflowY: 'auto',
+                whiteSpace: 'pre-wrap',
+              }}
+            >
               {ocrSnippet}
             </pre>
           </details>
@@ -314,22 +370,31 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
 
         {(stage === 'preview' || (stage === 'input' && tab === 'manual')) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-
             <Section title="Stock on hand" count={products.filter((p) => p.name.trim()).length}>
               {products.map((p, i) => (
-                <GridRow key={i} cols="2fr 1fr 1fr 1fr auto" onRemove={() => setProducts(products.filter((_, j) => j !== i))}>
+                <GridRow
+                  key={i}
+                  cols="2fr 1fr 1fr 1fr auto"
+                  onRemove={() => setProducts(products.filter((_, j) => j !== i))}
+                >
                   <Input placeholder="Item name" value={p.name} onChange={(v) => upd(products, setProducts, i, 'name', v)} />
                   <Input placeholder="Qty" value={p.quantity} onChange={(v) => upd(products, setProducts, i, 'quantity', v)} />
                   <Input placeholder="Unit" value={p.unit} onChange={(v) => upd(products, setProducts, i, 'unit', v)} />
                   <Input placeholder="Price" value={p.price} onChange={(v) => upd(products, setProducts, i, 'price', v)} />
                 </GridRow>
               ))}
-              <AddBtn onClick={() => setProducts([...products, { name: '', quantity: '', unit: '', price: '' }])}>Add product</AddBtn>
+              <AddBtn onClick={() => setProducts([...products, { name: '', quantity: '', unit: '', price: '' }])}>
+                Add product
+              </AddBtn>
             </Section>
 
             <Section title="Sales" count={sales.length}>
               {sales.map((s, i) => (
-                <GridRow key={i} cols="1fr 2fr 1fr 1fr 1fr auto" onRemove={() => setSales(sales.filter((_, j) => j !== i))}>
+                <GridRow
+                  key={i}
+                  cols="1fr 2fr 1fr 1fr 1fr auto"
+                  onRemove={() => setSales(sales.filter((_, j) => j !== i))}
+                >
                   <Input placeholder="Date" value={s.date} onChange={(v) => upd(sales, setSales, i, 'date', v)} />
                   <Input placeholder="Item" value={s.item} onChange={(v) => upd(sales, setSales, i, 'item', v)} />
                   <Input placeholder="Qty" value={s.quantity} onChange={(v) => upd(sales, setSales, i, 'quantity', v)} />
@@ -337,41 +402,86 @@ export default function UploadModal({ onClose }: { onClose: () => void }) {
                   <Input placeholder="Total" value={s.total} onChange={(v) => upd(sales, setSales, i, 'total', v)} />
                 </GridRow>
               ))}
-              <AddBtn onClick={() => setSales([...sales, { date: '', item: '', quantity: '', unitPrice: '', total: '' }])}>Add sale</AddBtn>
+              <AddBtn onClick={() => setSales([...sales, { date: '', item: '', quantity: '', unitPrice: '', total: '' }])}>
+                Add sale
+              </AddBtn>
             </Section>
 
             <Section title="Expenses" count={expenses.length}>
               {expenses.map((e, i) => (
-                <GridRow key={i} cols="1fr 3fr 1fr auto" onRemove={() => setExpenses(expenses.filter((_, j) => j !== i))}>
+                <GridRow
+                  key={i}
+                  cols="1fr 3fr 1fr auto"
+                  onRemove={() => setExpenses(expenses.filter((_, j) => j !== i))}
+                >
                   <Input placeholder="Date" value={e.date} onChange={(v) => upd(expenses, setExpenses, i, 'date', v)} />
                   <Input placeholder="Description" value={e.description} onChange={(v) => upd(expenses, setExpenses, i, 'description', v)} />
                   <Input placeholder="Amount R" value={e.amount} onChange={(v) => upd(expenses, setExpenses, i, 'amount', v)} />
                 </GridRow>
               ))}
-              <AddBtn onClick={() => setExpenses([...expenses, { date: '', description: '', amount: '' }])}>Add expense</AddBtn>
+              <AddBtn onClick={() => setExpenses([...expenses, { date: '', description: '', amount: '' }])}>
+                Add expense
+              </AddBtn>
             </Section>
 
             <Section title="Customers owed" count={receivables.filter((r) => r.customerName.trim()).length}>
               {receivables.map((r, i) => (
-                <GridRow key={i} cols="2fr 1fr 1fr auto" onRemove={() => setReceivables(receivables.filter((_, j) => j !== i))}>
+                <GridRow
+                  key={i}
+                  cols="2fr 1fr 1fr auto"
+                  onRemove={() => setReceivables(receivables.filter((_, j) => j !== i))}
+                >
                   <Input placeholder="Customer" value={r.customerName} onChange={(v) => upd(receivables, setReceivables, i, 'customerName', v)} />
                   <Input placeholder="Amount R" value={r.amount} onChange={(v) => upd(receivables, setReceivables, i, 'amount', v)} />
                   <Input type="date" value={r.dueDate} onChange={(v) => upd(receivables, setReceivables, i, 'dueDate', v)} />
                 </GridRow>
               ))}
-              <AddBtn onClick={() => setReceivables([...receivables, { customerName: '', amount: '', dueDate: '' }])}>Add customer</AddBtn>
+              <AddBtn onClick={() => setReceivables([...receivables, { customerName: '', amount: '', dueDate: '' }])}>
+                Add customer
+              </AddBtn>
             </Section>
           </div>
         )}
 
-        {message && <div className="small" style={{ background: 'var(--accent-soft-green)', color: 'var(--accent-emerald)', padding: '0.7rem 0.9rem', borderRadius: '0.9rem', fontWeight: 600 }}>✓ {message}</div>}
-        {error && <div className="small" style={{ background: '#FEE2E2', color: 'var(--critical)', padding: '0.7rem 0.9rem', borderRadius: '0.9rem', fontWeight: 600 }}>{error}</div>}
+        {message && (
+          <div className="small" style={{ background: 'var(--accent-soft-green)', color: 'var(--accent-emerald)', padding: '0.7rem 0.9rem', borderRadius: '0.9rem', fontWeight: 600 }}>
+            ✓ {message}
+          </div>
+        )}
+        {error && (
+          <div className="small" style={{ background: '#FEE2E2', color: 'var(--critical)', padding: '0.7rem 0.9rem', borderRadius: '0.9rem', fontWeight: 600 }}>
+            {error}
+          </div>
+        )}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
-          {stage === 'preview' && <button className="btn-ghost" onClick={() => { setStage('input'); setOcrSnippet(null); setPendingExtract(null); setScanImage(null); setDemoStageNum(null); }} disabled={busy} style={{ padding: '0.75rem 1rem' }}>← Back</button>}
-          <button className="btn-ghost" onClick={onClose} disabled={busy} style={{ padding: '0.75rem 1rem' }}>Close</button>
+          {stage === 'preview' && (
+            <button
+              className="btn-ghost"
+              onClick={() => {
+                setStage('input');
+                setOcrSnippet(null);
+                setPendingExtract(null);
+                setScanImage(null);
+              }}
+              disabled={busy}
+              style={{ padding: '0.75rem 1rem' }}
+            >
+              ← Back
+            </button>
+          )}
+          <button className="btn-ghost" onClick={onClose} disabled={busy} style={{ padding: '0.75rem 1rem' }}>
+            Close
+          </button>
           {(stage === 'preview' || (stage === 'input' && tab === 'manual')) && (
-            <button className="btn-primary" onClick={handleConfirm} disabled={busy} style={{ width: 'auto', paddingLeft: '1.5rem', paddingRight: '1.5rem' }}>{busy ? 'Saving…' : 'Confirm & save'}</button>
+            <button
+              className="btn-primary"
+              onClick={handleConfirm}
+              disabled={busy}
+              style={{ width: 'auto', paddingLeft: '1.5rem', paddingRight: '1.5rem' }}
+            >
+              {busy ? 'Saving…' : 'Confirm & save'}
+            </button>
           )}
         </div>
       </div>
@@ -383,7 +493,9 @@ function Section({ title, count, children }: { title: string; count: number; chi
   return (
     <div>
       <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'baseline', marginBottom: '0.5rem' }}>
-        <span className="small" style={{ fontWeight: 800 }}>{title}</span>
+        <span className="small" style={{ fontWeight: 800 }}>
+          {title}
+        </span>
         <span className="badge">{count}</span>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>{children}</div>
@@ -395,18 +507,40 @@ function GridRow({ children, cols, onRemove }: { children: React.ReactNode; cols
   return (
     <div style={{ display: 'grid', gridTemplateColumns: cols, gap: '0.4rem', alignItems: 'center' }}>
       {children}
-      <button onClick={onRemove} style={{ color: 'var(--critical)', fontSize: '1rem', padding: '0 0.6rem' }}>✕</button>
+      <button onClick={onRemove} style={{ color: 'var(--critical)', fontSize: '1rem', padding: '0 0.6rem' }}>
+        ✕
+      </button>
     </div>
   );
 }
 
 function AddBtn({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
-  return <button className="btn-ghost" onClick={onClick} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}><Icon name="plus" size={13} />{children}</button>;
+  return (
+    <button className="btn-ghost" onClick={onClick} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+      <Icon name="plus" size={13} />
+      {children}
+    </button>
+  );
 }
 
 function Input({ value, onChange, placeholder, type = 'text' }: { value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
   return (
-    <input type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} style={{ width: '100%', padding: '0.5rem 0.7rem', borderRadius: '0.6rem', border: '1px solid var(--border-hair)', background: 'rgba(255,255,255,0.06)', color: 'var(--fg)', font: 'inherit', fontSize: '0.8rem' }} />
+    <input
+      type={type}
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        width: '100%',
+        padding: '0.5rem 0.7rem',
+        borderRadius: '0.6rem',
+        border: '1px solid var(--border-hair)',
+        background: 'rgba(255,255,255,0.06)',
+        color: 'var(--fg)',
+        font: 'inherit',
+        fontSize: '0.8rem',
+      }}
+    />
   );
 }
 

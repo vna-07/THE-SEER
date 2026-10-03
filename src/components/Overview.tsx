@@ -7,9 +7,11 @@ import { Icon } from './Icon';
 export default function Overview({
   state,
   onWhy,
+  onOpenActions,
 }: {
   state: any;
   onWhy: (risk: any) => void;
+  onOpenActions: () => void;
 }) {
   const { totals, counts, risks, activity } = state;
   const [busy, setBusy] = useState<string | null>(null);
@@ -45,20 +47,31 @@ export default function Overview({
   }
 
   async function approveRisk(risk: any) {
-    const id = findActionId(risk);
-    if (!id) {
-      alert('No matching pending action found. This risk may already be approved.');
-      return;
-    }
-
     setBusy(risk.id);
     try {
+      let id = findActionId(risk);
+      if (!id) {
+        const queueRes = await fetch('/api/actions', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ risk: risk.actionDraft }),
+        });
+        if (!queueRes.ok) {
+          const err = await queueRes.text();
+          throw new Error(err || 'queue failed');
+        }
+        const queued = await queueRes.json();
+        id = Number(queued.id);
+      }
+      if (!id) throw new Error('No action was created for this recommendation');
+
       const res = await fetch(`/api/actions/${id}/approve`, { method: 'POST' });
       if (!res.ok) {
         const err = await res.text();
         throw new Error(err || 'approve failed');
       }
       setApproved((prev) => new Set(prev).add(risk.id));
+      onOpenActions();
     } catch (e: any) {
       alert('Approve failed: ' + String(e?.message ?? e));
     } finally {
