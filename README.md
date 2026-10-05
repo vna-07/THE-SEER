@@ -9,7 +9,7 @@
 ![Vercel](https://img.shields.io/badge/Vercel-Deployed-black?logo=vercel)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-**DevSoc Hackathon 2026** · Track 5 (AI & Automation) · Rhodes University, Hamilton Building · 2–4 October 2026
+**DevSoc Hackathon 2026** · Track 5 - (AI & Automation) · Rhodes University, Hamilton Building · 2–4 October 2026
 
 ---
 
