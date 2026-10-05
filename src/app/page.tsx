@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import Overview from '@/components/Overview';
 import Risks from '@/components/Risks';
@@ -374,6 +375,22 @@ export default function Home() {
                   Audit Chain
                 </NavItem>
               </nav>
+              <Link
+                href="/welcome"
+                style={{
+                  display: 'block',
+                  marginTop: '1rem',
+                  padding: '0.5rem 0.75rem',
+                  fontSize: '0.7rem',
+                  letterSpacing: '0.12em',
+                  textTransform: 'uppercase',
+                  color: 'rgba(243,239,228,0.4)',
+                  textDecoration: 'none',
+                  fontWeight: 700,
+                }}
+              >
+                About SEER →
+              </Link>
             </div>
 
             {stagingCount > 0 && (

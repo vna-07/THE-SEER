@@ -58,3 +58,7 @@ payload.json
 test-page.jpg
 ocr-response.json
 dev.log
+
+# Local artifacts — not part of the build
+*.pdf
+dev.jpg
