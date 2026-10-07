@@ -5,10 +5,7 @@
 
 <div align="center">
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:1a1410,50:8a5a1c,100:C9973B&height=200&section=header&text=THE%20SEER&fontSize=70&fontColor=F3EFE2&fontAlignY=38&desc=Small%20Enterprise%20Early-Warning%20%26%20Response&descSize=20&descAlignY=60" width="100%" alt="THE SEER banner" />
-
-<!-- Drop your logo at assets/seer-logo.png (the laurel-crowned profile from the project PDF) -->
-<img src="assets/seer-logo.png" alt="THE SEER logo" width="220" />
+<img src="public/logo_banner.png" alt="THE SEER" width="100%" />
 
 <br/>
 
@@ -564,6 +561,7 @@ Gemini free tier · Telegram free Bot API · Vercel free tier · hosted SQLite
 | `src/app/api/*` | Serverless routes: state, statements, audit chain, SERA, webhooks, data exports |
 | `src/app/verify/[hash]/` | Public cryptographic signature verification |
 | `src/app/page.tsx` | Command Centre dashboard |
+| `public/` | Brand and splash assets: `logo.png`, `logo.webp`, `logo_banner.png`, `intro.mp4` (5 s intro splash, H.264, 1.2 MB), `shine.mp3` (splash sound) |
 | `src/components/*` | Overview, Risks, Actions, Records, Simulation, Upload, SERA Chat, Audit Chain, ScanAnimation |
 | `scripts/*` | Database seeding, schema migration, system diagnostics |
 
