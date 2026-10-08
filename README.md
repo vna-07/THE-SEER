@@ -76,7 +76,7 @@
 - [🗂️ Repository Layout](#️-repository-layout)
 - [🚀 Run It Yourself](#-run-it-yourself)
 - [🗺️ Roadmap](#️-roadmap)
-- [👥 Team](#-team)
+- [👥 The Team](#-team)
 
 </td>
 </tr>
